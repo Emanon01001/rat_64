@@ -30,7 +30,7 @@ pub struct ImageData {
 struct EncryptedData {
     info: String,
     images: String,
-    encrypted: bool,  // 必須フィールドに変更（新形式では常にtrue）
+    encrypted: bool,  // Changed to a required field (always true in the new format)
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -41,7 +41,7 @@ struct KeyData {
 
 
 
-// 実際のAES-GCM復号化
+// Actual AES-GCM decryption
 pub fn decrypt_aes_gcm(encrypted_data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key));
     let plaintext = cipher.decrypt(Nonce::from_slice(nonce), encrypted_data)
@@ -49,43 +49,43 @@ pub fn decrypt_aes_gcm(encrypted_data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) 
     Ok(plaintext)
 }
 
-// メインの復号化関数
+// Main decryption function
 pub fn decrypt_data_file(file_path: &str, key_file: Option<&str>) -> Result<(SystemInfo, ImageData), Box<dyn std::error::Error>> {
-    // 1. データファイル読み込み
+    // 1. Read the data file
     let mut file = File::open(file_path)?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
 
-    // 2. MessagePackデコード
+    // 2. Decode MessagePack
     let encrypted_data: EncryptedData = from_msgpack_slice(&buffer)?;
 
-    // 3. 暗号化データの復号化（新形式専用）
+    // 3. Decrypt the encrypted payload (new format only)
     if !encrypted_data.encrypted {
-        return Err("このファイルは暗号化されていません。新形式のファイルが必要です。".into());
+        return Err("This file is not encrypted. A file created with the new format is required.".into());
     }
 
     let key_file_path = key_file.unwrap_or("key.bin");
     
-    // キーファイル読み込み
+    // Load the key file
     let mut key_file_handle = File::open(key_file_path)
-        .map_err(|_| format!("キーファイルが見つかりません: {}。AES暗号化には対応するキーファイルが必要です。", key_file_path))?;
+        .map_err(|_| format!("Key file not found: {}. AES decryption requires the matching key file.", key_file_path))?;
     let mut key_buffer = Vec::new();
     key_file_handle.read_to_end(&mut key_buffer)?;
     
-    // キーデータをMessagePackデコード
+    // Decode the key data from MessagePack
     let key_data: KeyData = from_msgpack_slice(&key_buffer)
-        .map_err(|_| "キーファイルの形式が不正です。")?;
+        .map_err(|_| "The key file format is invalid.")?;
     
     let key_bytes = general_purpose::STANDARD.decode(&key_data.key)
-        .map_err(|_| "キーのBase64デコードに失敗しました。")?;
+        .map_err(|_| "Failed to Base64 decode the key.")?;
     let nonce_bytes = general_purpose::STANDARD.decode(&key_data.nonce)
-        .map_err(|_| "NonceのBase64デコードに失敗しました。")?;
+        .map_err(|_| "Failed to Base64 decode the nonce.")?;
     
     if key_bytes.len() != 32 {
-        return Err(format!("キー長が不正です。32バイト必要ですが{}バイトです。", key_bytes.len()).into());
+        return Err(format!("Invalid key length: expected 32 bytes but got {} bytes.", key_bytes.len()).into());
     }
     if nonce_bytes.len() != 12 {
-        return Err(format!("Nonce長が不正です。12バイト必要ですが{}バイトです。", nonce_bytes.len()).into());
+        return Err(format!("Invalid nonce length: expected 12 bytes but got {} bytes.", nonce_bytes.len()).into());
     }
 
     let mut key = [0u8; 32];
@@ -94,25 +94,25 @@ pub fn decrypt_data_file(file_path: &str, key_file: Option<&str>) -> Result<(Sys
     nonce.copy_from_slice(&nonce_bytes);
 
     let enc_info = general_purpose::STANDARD.decode(&encrypted_data.info)
-        .map_err(|_| "システム情報データのBase64デコードに失敗しました。")?;
+        .map_err(|_| "Failed to Base64 decode the system information payload.")?;
     let enc_images = general_purpose::STANDARD.decode(&encrypted_data.images)
-        .map_err(|_| "画像データのBase64デコードに失敗しました。")?;
+        .map_err(|_| "Failed to Base64 decode the image payload.")?;
 
     let (decrypted_info, decrypted_images) = (
         decrypt_aes_gcm(&enc_info, &key, &nonce)
-            .map_err(|e| format!("システム情報の復号化に失敗しました: {}", e))?,
+            .map_err(|e| format!("Failed to decrypt system information: {}", e))?,
         decrypt_aes_gcm(&enc_images, &key, &nonce)
-            .map_err(|e| format!("画像データの復号化に失敗しました: {}", e))?
+            .map_err(|e| format!("Failed to decrypt image data: {}", e))?
     );
 
-    // 4. MessagePackデコード
+    // 4. Decode MessagePack
     let system_info: SystemInfo = from_msgpack_slice(&decrypted_info)?;
     let image_data: ImageData = from_msgpack_slice(&decrypted_images)?;
 
     Ok((system_info, image_data))
 }
 
-// スクリーンショットをファイルに保存
+// Save screenshot to a file
 pub fn save_screenshot(base64_data: &str, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     if base64_data.is_empty() {
         return Ok(());
@@ -123,7 +123,7 @@ pub fn save_screenshot(base64_data: &str, output_path: &str) -> Result<(), Box<d
     Ok(())
 }
 
-// Webカメラ画像をファイルに保存
+// Save webcam image to a file
 pub fn save_webcam_image(base64_data: &str, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     if base64_data.is_empty() {
         return Ok(());
@@ -144,11 +144,11 @@ mod tests {
         let nonce = [2u8; 12];
         let plaintext = b"Secret message";
 
-        // 暗号化
+        // Encryption
         let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(&key));
         let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce), plaintext.as_ref()).unwrap();
 
-        // 復号化
+        // Decryption
         let decrypted = decrypt_aes_gcm(&ciphertext, &key, &nonce).unwrap();
         assert_eq!(decrypted, plaintext);
     }

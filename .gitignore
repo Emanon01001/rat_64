@@ -1,6 +1,7 @@
 /target
-Cargo.lock
+/dist
 *.dat
 *.key
 *.png
 *.bin
+*.ps1
