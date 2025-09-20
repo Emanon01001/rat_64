@@ -6,6 +6,10 @@ default-run = "rat_64"
 
 [lib]
 name = "rat_64"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rat_64"
 path = "src/main.rs"
 
 [[bin]]

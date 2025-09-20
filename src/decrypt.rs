@@ -18,6 +18,45 @@ pub struct SystemInfo {
     pub security_software: Vec<String>,
     pub processor: String,
     pub country_code: String,
+    // 新しい詳細情報
+    pub total_memory: u64,
+    pub available_memory: u64,
+    pub disk_info: Vec<DiskInfo>,
+    pub network_interfaces: Vec<NetworkInterface>,
+    pub running_processes: Vec<ProcessInfo>,
+    pub installed_software: Vec<String>,
+    pub startup_programs: Vec<String>,
+    pub system_uptime: u64,
+    pub timezone: String,
+    pub language: String,
+    pub architecture: String,
+    pub boot_time: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DiskInfo {
+    pub name: String,
+    pub file_system: String,
+    pub total_space: u64,
+    pub available_space: u64,
+    pub mount_point: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NetworkInterface {
+    pub name: String,
+    pub ip_addresses: Vec<String>,
+    pub mac_address: String,
+    pub is_up: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ProcessInfo {
+    pub name: String,
+    pub pid: u32,
+    pub cpu_usage: f32,
+    pub memory_usage: u64,
+    pub exe_path: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
