@@ -111,12 +111,12 @@ pub fn send_encryption_key_webhook(config: &WebhookConfig, key: &[u8; 32], nonce
 }
 
 // Build timestamp without pulling chrono unless the feature is enabled
-#[cfg(any(feature = "datetime", feature = "webhook"))]
+#[cfg(any(feature = "datetime", feature = "network"))]
 fn now_timestamp() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-#[cfg(not(any(feature = "datetime", feature = "webhook")))]
+#[cfg(not(any(feature = "datetime", feature = "network")))]
 fn now_timestamp() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

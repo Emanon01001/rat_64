@@ -47,11 +47,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "decrypt"
-path = "src/bin/data_decrypt.rs"
-
-[[bin]]
-name = "token_dump"
-path = "src/bin/token_extractor.rs"
+path = "src/bin/decrypt.rs"
 
 # ---------------------------
 # 依存関係（安定運用向け設定）
@@ -106,7 +102,7 @@ default = ["core"]
 core = []
 
 # 個別モジュール機能
-webhook = ["dep:minreq", "dep:chrono"]       # Webhook送信（軽量HTTPクライアント）
+network = ["dep:minreq", "dep:chrono"]                    # ネットワーク通信（HTTP、ファイルアップロード）
 screenshot = ["dep:image", "dep:scrap"]                   # スクリーンショット機能
 browser = ["dep:rusqlite"]                                # ブラウザデータ取得機能
 
@@ -126,15 +122,11 @@ database = ["browser"]
 # 機能グループ（段階的構成）
 basic = ["core", "browser", "datetime"]                     # 基本機能：コア + ブラウザ + 日時
 extended = ["basic", "screenshot", "progress-bar"]          # 拡張機能：基本 + スクリーンショット + UI
-full = ["extended", "webhook", "logging"]                   # 全機能：拡張 + Webhook + ログ
+full = ["extended", "network", "logging"]                   # 全機能：拡張 + ネットワーク + ログ
 
-# サイズ最適化構成
-compact = ["core", "browser", "size-optimized"]            # コンパクト版（3MB目標）
-lite = ["core", "browser"]                                  # 軽量版（UI最小）
-
-# 便利なエイリアス
-all-modules = ["full"]                                      # 全モジュール有効
-minimal = ["core"]                                          # 最小構成
+# エイリアス（後方互換性）
+all-modules = ["full"]
+minimal = ["core"]
 
 # optional deps（必要時だけ読み込む）
 [dependencies.minreq]
@@ -142,8 +134,6 @@ version = "2.12"
 default-features = false
 features = ["https-rustls"]
 optional = true
-
-
 
 [dependencies.image]
 version = "0.25"

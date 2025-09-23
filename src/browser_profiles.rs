@@ -2,12 +2,44 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::env;
 
+/// Get default Firefox profile path for current platform
+fn get_default_profile_path() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = env::var_os("APPDATA") {
+            PathBuf::from(appdata).join("Mozilla").join("Firefox").join("Profiles")
+        } else {
+            PathBuf::from(".")
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = env::var_os("HOME") {
+            PathBuf::from(home).join("Library").join("Application Support").join("Firefox").join("Profiles")
+        } else {
+            PathBuf::from(".")
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(home) = env::var_os("HOME") {
+            PathBuf::from(home).join(".mozilla").join("firefox")
+        } else {
+            PathBuf::from(".")
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        PathBuf::from(".")
+    }
+}
+
 /// Get the default profile path (first available profile)
 pub fn get_default_profile() -> Result<PathBuf> {
     get_profile_path(None, false, Some("default".to_string()), false)
         .or_else(|_| {
             // fallback: try to get any profile automatically
-            let base = crate::cli::get_default_profile_path();
+            let base = get_default_profile_path();
             let profile_ini = base.join("profiles.ini");
             if profile_ini.exists() {
                 // Try to parse profiles.ini and get the first profile
@@ -21,7 +53,7 @@ pub fn get_default_profile() -> Result<PathBuf> {
 
 /// Get the first available profile from profiles.ini
 fn get_first_available_profile() -> Result<PathBuf> {
-    let base = crate::cli::get_default_profile_path();
+    let base = get_default_profile_path();
     let profile_ini = base.join("profiles.ini");
     
     if !profile_ini.exists() {
@@ -90,7 +122,7 @@ pub fn get_profile_path(profile_arg: Option<&Path>, interactive: bool, choice: O
             };
             PathBuf::from(expanded)
         }
-        None => crate::cli::get_default_profile_path(),
+        None => get_default_profile_path(),
     };
 
     let profile_ini = base.join("profiles.ini");

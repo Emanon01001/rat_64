@@ -1,6 +1,8 @@
 use anyhow::Result;
 use serde_json::Value;
 use std::io::{self, Write};
+use std::fs;
+use std::path::Path;
 
 pub trait OutputFormat {
     fn output(&self) -> Result<()>;
@@ -38,7 +40,8 @@ impl JsonOutput {
 
 impl OutputFormat for JsonOutput {
     fn output(&self) -> Result<()> {
-        let _ = serde_json::to_string_pretty(&self.items)?;
+        let json_str = serde_json::to_string_pretty(&self.items)?;
+        writeln!(io::stdout(), "{}", json_str)?;
         Ok(())
     }
 }
@@ -54,13 +57,79 @@ impl CsvOutput {
 impl OutputFormat for CsvOutput {
     fn output(&self) -> Result<()> {
         // CSV機能を標準ライブラリで実装
-        let _ = ();
+        writeln!(io::stdout(), "url,username,password")?;
         for v in &self.items {
-            let _ = v["url"].as_str().unwrap_or("").replace(",", ";");
-            let _ = v["user"].as_str().unwrap_or("").replace(",", ";");
-            let _ = v["password"].as_str().unwrap_or("").replace(",", ";");
-            let _ = ();
+            let url = v["url"].as_str().unwrap_or("").replace(",", ";");
+            let user = v["user"].as_str().unwrap_or("").replace(",", ";");
+            let password = v["password"].as_str().unwrap_or("").replace(",", ";");
+            writeln!(io::stdout(), "{},{},{}", url, user, password)?;
         }
         Ok(())
+    }
+}
+
+/// ファイルに出力する統合エクスポーター
+pub struct FileExporter {
+    items: Vec<Value>,
+}
+
+impl FileExporter {
+    pub fn new(items: Vec<Value>) -> Self {
+        Self { items }
+    }
+
+    /// JSONファイルとして出力
+    pub fn export_json<P: AsRef<Path>>(&self, file_path: P) -> Result<()> {
+        let json_str = serde_json::to_string_pretty(&self.items)?;
+        fs::write(file_path, json_str)?;
+        Ok(())
+    }
+
+    /// CSVファイルとして出力
+    pub fn export_csv<P: AsRef<Path>>(&self, file_path: P) -> Result<()> {
+        let mut output = String::new();
+        output.push_str("url,username,password\n");
+        
+        for v in &self.items {
+            let url = v["url"].as_str().unwrap_or("").replace(",", ";");
+            let user = v["user"].as_str().unwrap_or("").replace(",", ";");
+            let password = v["password"].as_str().unwrap_or("").replace(",", ";");
+            output.push_str(&format!("{},{},{}\n", url, user, password));
+        }
+        
+        fs::write(file_path, output)?;
+        Ok(())
+    }
+
+    /// ファイルをエクスポートして、オプションでアップロード
+    #[cfg(feature = "network")]
+    pub fn export_and_upload_json<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        uploader: Option<&crate::file_uploader::Uploader>
+    ) -> Result<Option<crate::file_uploader::UploadResult>> {
+        // まずファイルをエクスポート
+        self.export_json(&file_path)?;
+        
+        // アップローダーがあればアップロード実行
+        if let Some(uploader) = uploader {
+            let result = uploader.upload(&file_path)
+                .map_err(|e| anyhow::anyhow!("Upload failed: {}", e))?;
+            Ok(Some(result))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// network機能が無効な場合のスタブ
+    #[cfg(not(feature = "network"))]
+    pub fn export_and_upload_json<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        _upload_config: Option<&()>
+    ) -> Result<Option<()>> {
+        // ファイルエクスポートのみ実行
+        self.export_json(file_path)?;
+        Ok(None)
     }
 }

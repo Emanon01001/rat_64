@@ -1,16 +1,13 @@
-// src/modules/mod.rs - モジュール定義ファイル
+// 最適化されたモジュール定義
 
-#[cfg(feature = "webhook")]
+#[cfg(feature = "network")]
 pub mod notification_sender;
 
 #[cfg(feature = "screenshot")]
 pub mod screen_capture;
 
-// 基本システムモジュール  
-pub mod common_utils;
-
 // モジュールの再エクスポート
-#[cfg(feature = "webhook")]
+#[cfg(feature = "network")]
 pub use notification_sender::*;
 
 #[cfg(feature = "screenshot")]
