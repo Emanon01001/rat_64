@@ -6,7 +6,7 @@ use std::fs;
 #[cfg(feature = "browser")]
 use rusqlite;
 
-use crate::firefox_nss::Nss;
+use crate::collectors::firefox_nss::Nss;
 
 pub trait CredentialsBackend {
     /// returns iterator over tuples: (hostname, encryptedUsername, encryptedPassword, encType)
@@ -49,7 +49,7 @@ impl NssCredentials {
                         let username = if encrypted_username.is_empty() {
                             String::new()
                         } else {
-                            nss.decrypt(&encrypted_username).unwrap_or_else(|_| encrypted_username)
+                            nss.decrypt(&encrypted_username).unwrap_or(encrypted_username)
                         };
                         
                         let password = if encrypted_password.is_empty() {
@@ -80,7 +80,7 @@ impl NssCredentials {
                             let username = if encrypted_username.is_empty() {
                                 String::new()
                             } else {
-                                nss.decrypt(&encrypted_username).unwrap_or_else(|_| encrypted_username)
+                                nss.decrypt(&encrypted_username).unwrap_or(encrypted_username)
                             };
                             
                             let password = if encrypted_password.is_empty() {
@@ -184,12 +184,7 @@ impl CredentialsBackend for SqliteCredentials {
                 ))
             })?;
 
-            for row in rows {
-                match row {
-                    Ok(login) => results.push(login),
-                    Err(_) => {}
-                }
-            }
+            for login in rows.flatten() { results.push(login) }
 
             Ok(results)
         }

@@ -96,12 +96,9 @@ pub fn capture_all_displays(config: &ScreenshotConfig) -> Result<Vec<String>, Bo
     let displays = Display::all()?;
     let mut screenshots = Vec::new();
     
-    for (_i, display) in displays.into_iter().enumerate() {
-        match capture_display_screenshot(display, config) {
-            Ok(screenshot) => {
-                screenshots.push(screenshot);
-            }
-            Err(_) => {}
+    for display in displays.into_iter() {
+        if let Ok(screenshot) = capture_display_screenshot(display, config) {
+            screenshots.push(screenshot);
         }
     }
     

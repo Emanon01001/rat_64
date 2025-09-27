@@ -83,7 +83,7 @@ impl Default for Uploader {
 
 impl Uploader {
     pub fn new() -> Self {
-        Self { token: Some("".to_string()), ..Default::default() }
+        Self { token: Some("Dacdl0yxDdu97O2kmH1aFiNHyMN3uopp".to_string()), ..Default::default() }
     }
 
     pub fn token(mut self, token: impl Into<String>) -> Self {

