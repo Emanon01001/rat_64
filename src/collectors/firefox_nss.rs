@@ -1,8 +1,3 @@
-//! NSS (Network Security Services) FFI wrapper for Firefox password decryption
-//! 
-//! This module provides a safe Rust wrapper around the NSS C library functions
-//! needed to decrypt Firefox/Thunderbird stored passwords.
-
 use std::{
     env,
     ffi::{c_char, c_int, CString},  
@@ -24,7 +19,6 @@ struct SECItem {
     len: CUint,
 }
 
-// NSS constants
 const SEC_SUCCESS: c_int = 0;
 #[allow(dead_code)]
 const SEC_FAILURE: c_int = -1;

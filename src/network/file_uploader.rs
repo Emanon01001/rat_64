@@ -1,27 +1,3 @@
-//! GoFile Upload System for RAT-64
-//! 
-//! # 使用例
-//! 
-//! ## 認証なし（新規公開フォルダ）
-//! ```rust
-//! use rat_64::file_uploader::*;
-//! 
-//! let up = Uploader::new().with_best_server()?;
-//! let out = up.upload("data.dat")?;
-//! println!("Download URL: {:?}", out.download_page);
-//! ```
-//! 
-//! ## 認証＋フォルダ指定（東京リージョン指定）
-//! ```rust
-//! use rat_64::file_uploader::*;
-//! 
-//! let up = Uploader::new()
-//!     .token(std::env::var("GOFILE_TOKEN")?)
-//!     .folder_id("XXXX-YYYY")
-//!     .upload_url("https://upload-ap-tyo.gofile.io/uploadfile");
-//! let out = up.upload("data.dat")?;
-//! ```
-
 use std::{fmt, path::Path};
 
 #[derive(Debug)]
@@ -168,7 +144,6 @@ impl Uploader {
                 .with_timeout((self.timeout_secs as i32).try_into().unwrap())
                 .with_body(body);
 
-            // v2 API は Bearer を好むが、フォームの token でも通る環境あり
             if let Some(t) = &self.token {
                 // Authorization はあっても害はない
                 req = req.with_header("Authorization", format!("Bearer {t}"));
@@ -178,7 +153,6 @@ impl Uploader {
             let status = resp.status_code;
             let raw = resp.as_str().unwrap_or("").to_string();
 
-            // JSON を素直に読む（v1/v2の差異を吸収）
             let v: serde_json::Value =
                 serde_json::from_str(&raw).map_err(|e| UploadError::Json(format!("{e}: {raw}")))?;
 
@@ -194,7 +168,6 @@ impl Uploader {
                 }
                 _ => {}
             }
-
 
             match v.get("status").and_then(|s| s.as_str()) {
                 Some("ok") => {} // 続行
@@ -226,11 +199,6 @@ impl Uploader {
                 direct_link: direct,
                 raw,
             })
-        }
-        #[cfg(not(feature = "network"))]
-        {
-            let _ = file_path;
-            Err(UploadError::Disabled("Upload requires 'network' feature"))
         }
     }
 

