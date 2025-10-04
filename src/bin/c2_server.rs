@@ -11,6 +11,9 @@ use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::{Mutex, Notify}, time};
+// Safe diagnostics from library (no secrets)
+use rat_64::collectors::network_diagnostics::collect_network_diagnostics;
+use rat_64::get_system_info;
 
 
 const AUTH_TOKEN: &str = "SECURE_TOKEN_32_CHARS_MINIMUM_LEN";
@@ -40,6 +43,7 @@ struct AppState {
     response_log: Mutex<Vec<Value>>,
     activity_log: Mutex<Vec<LogEntry>>,
     notify: Notify,
+    server_start: u64,
 }
 
 fn unix_time() -> u64 { Utc::now().timestamp() as u64 }
@@ -637,10 +641,6 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
       post('/ui/add-create-dir', {{ path: path }}, `ディレクトリ作成: ${{path}}`);
     }}
     
-    function quickPath(path) {{
-      document.getElementById('file_path').value = path;
-      showToast(`パスを設定: ${{path}}`, 'info');
-    }}
     
     // 初期化
     document.addEventListener('DOMContentLoaded', function() {{
@@ -693,19 +693,15 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
       <div class="card">
         <h3><span class="card-icon"></span>ファイル管理</h3>
         
-        <div style="margin-bottom: 15px;">
-          <button type="button" class="btn-success" onclick="post('/ui/add-list-files', null, 'カレントディレクトリ一覧取得')">Current Directory</button>
-          <button type="button" class="btn-success" onclick="post('/ui/add-list-files-win', null, 'C:\\ ドライブ一覧取得')">C:\\ Drive</button>
-        </div>
+        
 
-        <div class="quick-actions">
-          <strong>クイックパス:</strong>
-          <button type="button" class="btn-primary" onclick="quickPath('C:\Windows\System32')">System32</button>
-          <button type="button" class="btn-primary" onclick="quickPath('C:\Users')">Users</button>
-          <button type="button" class="btn-primary" onclick="quickPath('C:\Program Files')">Program Files</button>
-          <button type="button" class="btn-primary" onclick="quickPath('C:\Temp')">Temp</button>
-        </div>
-
+        
+          
+          
+          
+          
+          
+        
         <div class="input-group">
           <label>ファイルパス:</label>
           <input type="text" id="file_path" placeholder="例: C:\Windows\notepad.exe">
@@ -894,6 +890,38 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             Ok(json_response(status, StatusCode::OK))
         }
 
+        // Debug endpoints (authorized, safe, non-secret) ----------------
+        (Method::GET, "/api/debug/health") => {
+            if !is_authorized(&req) { return Ok(unauthorized()); }
+            let q = state.command_queue.lock().await;
+            let r = state.response_log.lock().await;
+            let now = unix_time();
+            let uptime = now.saturating_sub(state.server_start);
+            let body = json!({
+                "status": "ok",
+                "server_time": now,
+                "uptime_secs": uptime,
+                "queue_len": q.len(),
+                "responses_len": r.len(),
+            });
+            Ok(json_response(body, StatusCode::OK))
+        }
+
+        (Method::GET, "/api/debug/network") => {
+            if !is_authorized(&req) { return Ok(unauthorized()); }
+            let lines = collect_network_diagnostics();
+            let limited: Vec<String> = lines.into_iter().take(500).collect();
+            Ok(json_response(json!({"lines": limited}), StatusCode::OK))
+        }
+
+        (Method::GET, "/api/debug/sysinfo") => {
+            if !is_authorized(&req) { return Ok(unauthorized()); }
+            match get_system_info() {
+                Ok(info) => Ok(json_response(serde_json::to_value(info).unwrap_or_else(|_| json!({"error":"serialize"})), StatusCode::OK)),
+                Err(e) => Ok(json_response(json!({"error": format!("{}", e)}), StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        }
+
         (Method::GET, "/api/logs") => {
             let limit = parse_query_u64(&req, "limit", 50);
             let offset = parse_query_u64(&req, "offset", 0);
@@ -966,6 +994,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         response_log: Mutex::new(Vec::new()),
         activity_log: Mutex::new(Vec::new()),
         notify: Notify::new(),
+        server_start: unix_time(),
     });
 
     println!("============================================================");
@@ -987,6 +1016,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("  POST /api/commands/response");
     println!("  POST /api/heartbeat");
     println!("  POST /api/data/upload");
+    println!("\nDebug endpoints (Authorization required, safe):");
+    println!("  GET  /api/debug/health");
+    println!("  GET  /api/debug/network");
+    println!("  GET  /api/debug/sysinfo");
     println!("\nListening on http://0.0.0.0:{}", PORT);
 
     let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;
