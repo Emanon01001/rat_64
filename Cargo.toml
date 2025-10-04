@@ -133,6 +133,10 @@ ui-minimal = []                                           # UI要素を最小化
 crypto-minimal = []                                       # 暗号化機能を最小化
 size-optimized = ["ui-minimal", "crypto-minimal"]        # 総合サイズ最適化
 
+# サーバー診断エンドポイント（任意）
+# 有効化時のみ /api/health, /api/network, /api/sysinfo を提供
+server_diagnostics = []
+
 # 重複削除：database = browserのエイリアスは不要
 
 # 機能グループ（段階的構成）

@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::{Mutex, Notify}, time};
 // Safe diagnostics from library (no secrets)
+#[cfg(feature = "server_diagnostics")]
 use rat_64::collectors::network_diagnostics::collect_network_diagnostics;
+#[cfg(feature = "server_diagnostics")]
 use rat_64::get_system_info;
 
 
@@ -1214,7 +1216,8 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             Ok(json_response(status, StatusCode::OK))
         }
 
-        // Debug endpoints (authorized, safe, non-secret) ----------------
+        // Diagnostics endpoints (authorized) ----------------
+        #[cfg(feature = "server_diagnostics")]
         (Method::GET, "/api/health") => {
             if !is_authorized(&req) { return Ok(unauthorized()); }
             let q = state.command_queue.lock().await;
@@ -1231,6 +1234,7 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             Ok(json_response(body, StatusCode::OK))
         }
 
+        #[cfg(feature = "server_diagnostics")]
         (Method::GET, "/api/network") => {
             if !is_authorized(&req) { return Ok(unauthorized()); }
             let lines = collect_network_diagnostics();
@@ -1238,6 +1242,7 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             Ok(json_response(json!({"lines": limited}), StatusCode::OK))
         }
 
+        #[cfg(feature = "server_diagnostics")]
         (Method::GET, "/api/sysinfo") => {
             if !is_authorized(&req) { return Ok(unauthorized()); }
             match get_system_info() {
@@ -1339,10 +1344,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("  POST /api/commands/response");
     println!("  POST /api/heartbeat");
     println!("  POST /api/data/upload");
-    println!("\nDiagnostics endpoints (Authorization required):");
-    println!("  GET  /api/health");
-    println!("  GET  /api/network");
-    println!("  GET  /api/sysinfo");
+    #[cfg(feature = "server_diagnostics")]
+    {
+        println!("\nDiagnostics endpoints (Authorization required):");
+        println!("  GET  /api/health");
+        println!("  GET  /api/network");
+        println!("  GET  /api/sysinfo");
+    }
     println!("\nListening on http://0.0.0.0:{}", PORT);
 
     let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;
