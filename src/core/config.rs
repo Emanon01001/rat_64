@@ -39,7 +39,7 @@ impl Default for Config {
             // HTTPサーバー通信設定
             command_server_url: "http://localhost:9999".to_string(),
             command_server_enabled: true,
-            command_auth_token: "SECURE_TOKEN_32_CHARS_MINIMUM_LEN".to_string(),
+            command_auth_token: "ZajmPAB9o8C5UgATU23mnGdBcun30IuILDaP8efMWRYtSlvT89".to_string(),
             command_poll_interval_seconds: 10,
             heartbeat_interval_seconds: 30,
         }

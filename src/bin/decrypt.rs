@@ -54,8 +54,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("Key and nonce validation successful");
     
-    let key_array: [u8; 32] = key.try_into().unwrap();
-    let nonce_array: [u8; 12] = nonce.try_into().unwrap();
+    let key_array: [u8; 32] = key.try_into()
+        .map_err(|_| "Key array conversion failed")?;
+    let nonce_array: [u8; 12] = nonce.try_into()
+        .map_err(|_| "Nonce array conversion failed")?;
     
     // 復号化と保存
     decrypt_and_save(data_file, &key_array, &nonce_array)?;
