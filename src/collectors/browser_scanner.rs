@@ -1,5 +1,8 @@
 use anyhow::Result;
 
+#[cfg(feature = "datetime")]
+use chrono::{DateTime, Utc};
+
 // 条件コンパイル対応のログマクロ
 #[cfg(not(feature = "logging"))]
 macro_rules! debug {

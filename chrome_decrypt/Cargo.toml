@@ -6,7 +6,17 @@ edition = "2021"
 [lib]
 name = "chrome_decrypt"
 crate-type = ["cdylib"]
-path = "../src/chrome_decrypt.rs"
+path = "../src/services/chrome_decrypt.rs"
+
+[profile.release-tiny]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+overflow-checks = false
 
 [dependencies]
 anyhow = { version = "1.0", default-features = false }
@@ -22,4 +32,7 @@ windows = { version = "0.62.0", default-features = false, features = [
   "Win32_Foundation",
   "Win32_System_Com",
   "Win32_System_Ole",
+  "Win32_System_LibraryLoader",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
 ] }

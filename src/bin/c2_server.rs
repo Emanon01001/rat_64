@@ -1014,25 +1014,7 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
 
     <div class="grid">
       <div class="card">
-        <h3><span class="card-icon"></span>基本コマンド</h3>
-        <button type="button" class="btn-primary" onclick="post('/ui/add-status', null, 'ステータス確認コマンド送信')">Status Check</button>
-        <button type="button" class="btn-primary" onclick="post('/ui/add-ping', null, 'Pingコマンド送信')">Ping Test</button>
-        <button type="button" class="btn-success" onclick="post('/ui/add-collect', null, 'システム情報収集開始')">Collect System Info</button>
-        <button type="button" class="btn-danger" onclick="post('/ui/add-shutdown', null, 'シャットダウンコマンド送信')">Shutdown</button>
-      </div>
-
-      <div class="card">
         <h3><span class="card-icon"></span>ファイル管理</h3>
-        
-        
-
-        
-          
-          
-          
-          
-          
-        
         <div class="input-group">
           <label>ファイルパス:</label>
           <input type="text" id="file_path" placeholder="例: C:\Windows\notepad.exe">
@@ -1142,12 +1124,6 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
                 "responses": recent
             }), StatusCode::OK))
         }
-
-        // 基本コマンド（認証不要）
-        (Method::POST, "/ui/add-status") => handle_simple_command(&state, "status", "status").await,
-        (Method::POST, "/ui/add-ping") => handle_simple_command(&state, "ping", "ping").await,
-        (Method::POST, "/ui/add-collect") => handle_simple_command(&state, "collect", "collect_system_info").await,
-        (Method::POST, "/ui/add-shutdown") => handle_simple_command(&state, "shutdown", "shutdown").await,
 
         // ファイル管理コマンド（固定パス）
         (Method::POST, "/ui/add-list-files") => handle_file_command(&state, "list_files", "list_files", vec![".", "false"]).await,
@@ -1436,10 +1412,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Server URL: http://localhost:{}", PORT);
     println!("Auth Token: {}", AUTH_TOKEN);
     println!("\nUI: open http://localhost:{PORT}/ to enqueue commands and send webhook.");
-    println!("  POST /ui/add-status");
-    println!("  POST /ui/add-ping");
-    println!("  POST /ui/add-collect");
-    println!("  POST /ui/add-shutdown");
     println!("  POST /ui/queue-webhook");
     println!("  POST /ui/execute-command (JSON: {{\"command\":\"...\", \"timeout\":30, \"working_dir\":\"...\"}})");
     println!("  + File management, directory operations");

@@ -49,12 +49,6 @@ split-debuginfo = "off"
 name = "rat_64"
 path = "src/lib.rs"
 
-# ChromeBrowserDLL specific configuration
-[package.metadata.chrome_browser_dll]
-name = "chrome_browser_dll"
-path = "src/chrome_browser_dll.rs" 
-crate-type = ["cdylib"]
-
 [[bin]]
 name = "decrypt"
 path = "src/bin/decrypt.rs"
