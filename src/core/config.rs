@@ -37,7 +37,7 @@ impl Default for Config {
             collect_discord_tokens: true,
             
             // HTTPサーバー通信設定
-            command_server_url: "http://localhost:8080".to_string(),
+            command_server_url: "http://localhost:9999".to_string(),
             command_server_enabled: true,
             command_auth_token: "SECURE_TOKEN_32_CHARS_MINIMUM_LEN".to_string(),
             command_poll_interval_seconds: 10,

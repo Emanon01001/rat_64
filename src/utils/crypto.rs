@@ -3,11 +3,7 @@ use aes_gcm::{Aes256Gcm, Nonce, aead::{Aead, KeyInit}};
 use rand::RngCore;
 use crate::{RatResult, RatError};
 
-#[deprecated(note = "Use generate_key_pair + encrypt_data_with_key instead. This returns ciphertext only and discards the key/nonce.")]
-pub fn encrypt_data(data: &[u8]) -> RatResult<Vec<u8>> {
-    let (key, nonce) = generate_key_pair();
-    encrypt_data_with_key(data, &key, &nonce)
-}
+// 非推奨関数を削除：generate_key_pair + encrypt_data_with_key を直接使用
 
 pub fn encrypt_data_with_key(data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> RatResult<Vec<u8>> {
     let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key));

