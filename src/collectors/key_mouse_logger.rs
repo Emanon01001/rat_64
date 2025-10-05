@@ -28,7 +28,7 @@ mod imp {
         pub window_title: Option<String>, // アクティブウィンドウ（将来用）
     }
     
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     pub struct InputStatistics {
         pub total_keystrokes: u32,
         pub total_mouse_clicks: u32,

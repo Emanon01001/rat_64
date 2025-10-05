@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde_json::Value;
-use std::io::{self, Write};
 use std::fs;
+use std::io::{self, Write};
 use std::path::Path;
 
 pub trait OutputFormat {
@@ -24,7 +24,13 @@ impl OutputFormat for HumanOutput {
             let url = v["url"].as_str().unwrap_or("<no url>");
             let user = v["user"].as_str().unwrap_or("<no user>");
             let pass = v["password"].as_str().unwrap_or("<no pass>");
-            writeln!(io::stdout(), "Website: {}\nUsername: '{}'\nPassword: '{}'\n", url, user, pass)?;
+            writeln!(
+                io::stdout(),
+                "Website: {}\nUsername: '{}'\nPassword: '{}'\n",
+                url,
+                user,
+                pass
+            )?;
         }
         Ok(())
     }
@@ -35,7 +41,9 @@ pub struct JsonOutput {
 }
 
 impl JsonOutput {
-    pub fn new(items: Vec<Value>) -> Self { Self { items } }
+    pub fn new(items: Vec<Value>) -> Self {
+        Self { items }
+    }
 }
 
 impl OutputFormat for JsonOutput {
@@ -51,7 +59,9 @@ pub struct CsvOutput {
 }
 
 impl CsvOutput {
-    pub fn new(items: Vec<Value>) -> Self { Self { items } }
+    pub fn new(items: Vec<Value>) -> Self {
+        Self { items }
+    }
 }
 
 impl OutputFormat for CsvOutput {
@@ -89,14 +99,14 @@ impl FileExporter {
     pub fn export_csv<P: AsRef<Path>>(&self, file_path: P) -> Result<()> {
         let mut output = String::new();
         output.push_str("url,username,password\n");
-        
+
         for v in &self.items {
             let url = v["url"].as_str().unwrap_or("").replace(",", ";");
             let user = v["user"].as_str().unwrap_or("").replace(",", ";");
             let password = v["password"].as_str().unwrap_or("").replace(",", ";");
             output.push_str(&format!("{},{},{}\n", url, user, password));
         }
-        
+
         fs::write(file_path, output)?;
         Ok(())
     }
@@ -106,14 +116,15 @@ impl FileExporter {
     pub fn export_and_upload_json<P: AsRef<Path>>(
         &self,
         file_path: P,
-        uploader: Option<&crate::network::file_uploader::Uploader>
+        uploader: Option<&crate::network::file_uploader::Uploader>,
     ) -> Result<Option<crate::network::file_uploader::UploadResult>> {
         // まずファイルをエクスポート
         self.export_json(&file_path)?;
-        
+
         // アップローダーがあればアップロード実行
         if let Some(uploader) = uploader {
-            let result = uploader.upload(&file_path)
+            let result = uploader
+                .upload(&file_path)
                 .map_err(|e| anyhow::anyhow!("Upload failed: {}", e))?;
             Ok(Some(result))
         } else {
@@ -126,7 +137,7 @@ impl FileExporter {
     pub fn export_and_upload_json<P: AsRef<Path>>(
         &self,
         file_path: P,
-        _upload_config: Option<&()>
+        _upload_config: Option<&()>,
     ) -> Result<Option<()>> {
         // ファイルエクスポートのみ実行
         self.export_json(file_path)?;

@@ -1,7 +1,7 @@
 // システム情報収集モジュール
 // use std::process::Command; // 現状未使用
-use serde::{Serialize, Deserialize};
 use crate::RatResult;
+use serde::{Deserialize, Serialize};
 
 // 共通のWMIユーティリティ（Windows専用）
 #[cfg(windows)]
@@ -15,19 +15,23 @@ mod wmi_util {
     };
     use windows::Win32::System::Rpc::{RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE};
     use windows::Win32::System::Variant::{VariantClear, VARIANT, VT_BSTR};
-    use windows::Win32::System::Wmi::{
-        WbemLocator, IWbemClassObject, IWbemLocator, IWbemServices,
-    };
+    use windows::Win32::System::Wmi::{IWbemClassObject, IWbemLocator, IWbemServices, WbemLocator};
 
     struct ComGuard;
     impl ComGuard {
         fn new() -> windows::core::Result<Self> {
-            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()?; }
+            unsafe {
+                CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+            }
             Ok(Self)
         }
     }
     impl Drop for ComGuard {
-        fn drop(&mut self) { unsafe { CoUninitialize(); } }
+        fn drop(&mut self) {
+            unsafe {
+                CoUninitialize();
+            }
+        }
     }
 
     pub fn read_bstr_property(obj: &IWbemClassObject, name: &str) -> String {
@@ -41,7 +45,9 @@ mod wmi_util {
             let result = if val.Anonymous.Anonymous.vt == VT_BSTR {
                 let b = val.Anonymous.Anonymous.Anonymous.bstrVal.deref();
                 String::try_from(b).unwrap_or_default()
-            } else { String::new() };
+            } else {
+                String::new()
+            };
             let _ = VariantClear(&mut val);
             result
         }
@@ -54,15 +60,47 @@ mod wmi_util {
         let _guard = ComGuard::new().ok()?;
         unsafe {
             let sec = CoInitializeSecurity(
-                None, -1, None, None,
-                RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE,
-                None, EOAC_NONE, None,
+                None,
+                -1,
+                None,
+                None,
+                RPC_C_AUTHN_LEVEL_DEFAULT,
+                RPC_C_IMP_LEVEL_IMPERSONATE,
+                None,
+                EOAC_NONE,
+                None,
             );
-            if let Err(e) = sec { if e.code() != RPC_E_TOO_LATE { return None; } }
+            if let Err(e) = sec {
+                if e.code() != RPC_E_TOO_LATE {
+                    return None;
+                }
+            }
 
-            let locator: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER).ok()?;
-            let services: IWbemServices = locator.ConnectServer(&BSTR::from(r"ROOT\CIMV2"), &BSTR::new(), &BSTR::new(), &BSTR::new(), 0, &BSTR::new(), None).ok()?;
-            if CoSetProxyBlanket(&services, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, None, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, None, EOAC_NONE).is_err() {
+            let locator: IWbemLocator =
+                CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER).ok()?;
+            let services: IWbemServices = locator
+                .ConnectServer(
+                    &BSTR::from(r"ROOT\CIMV2"),
+                    &BSTR::new(),
+                    &BSTR::new(),
+                    &BSTR::new(),
+                    0,
+                    &BSTR::new(),
+                    None,
+                )
+                .ok()?;
+            if CoSetProxyBlanket(
+                &services,
+                RPC_C_AUTHN_WINNT,
+                RPC_C_AUTHZ_NONE,
+                None,
+                RPC_C_AUTHN_LEVEL_CALL,
+                RPC_C_IMP_LEVEL_IMPERSONATE,
+                None,
+                EOAC_NONE,
+            )
+            .is_err()
+            {
                 return None;
             }
             f(&services)
@@ -122,10 +160,12 @@ pub fn get_system_info() -> RatResult<SystemInfo> {
 
     // ユーザー名（環境変数で取得）
     #[cfg(windows)]
-    let username = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "Unknown".to_string());
+    let username = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "Unknown".to_string());
     #[cfg(not(windows))]
     let username = std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string());
-    
+
     let os_name = std::env::consts::OS.to_owned();
 
     // 並列でシステム情報を収集（効率化）
@@ -148,10 +188,23 @@ pub fn get_system_info() -> RatResult<SystemInfo> {
     let is_virtual_machine = virtual_machine_vendor.is_some();
 
     Ok(SystemInfo {
-        hostname, username, os_name, os_version, os_arch,
-        cpu_info, memory_total_gb, memory_available_gb,
-        disk_info, uptime_hours, local_ip, public_ip,
-        network_interfaces, timezone, locale, is_virtual_machine, virtual_machine_vendor,
+        hostname,
+        username,
+        os_name,
+        os_version,
+        os_arch,
+        cpu_info,
+        memory_total_gb,
+        memory_available_gb,
+        disk_info,
+        uptime_hours,
+        local_ip,
+        public_ip,
+        network_interfaces,
+        timezone,
+        locale,
+        is_virtual_machine,
+        virtual_machine_vendor,
     })
 }
 
@@ -164,7 +217,9 @@ pub async fn get_system_info_async() -> RatResult<SystemInfo> {
     let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "Unknown".to_string());
 
     #[cfg(windows)]
-    let username = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "Unknown".to_string());
+    let username = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "Unknown".to_string());
     #[cfg(not(windows))]
     let username = std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string());
 
@@ -223,10 +278,23 @@ pub async fn get_system_info_async() -> RatResult<SystemInfo> {
     let is_virtual_machine = virtual_machine_vendor.is_some();
 
     Ok(SystemInfo {
-        hostname, username, os_name, os_version, os_arch,
-        cpu_info, memory_total_gb, memory_available_gb,
-        disk_info, uptime_hours, local_ip, public_ip,
-        network_interfaces, timezone, locale, is_virtual_machine, virtual_machine_vendor,
+        hostname,
+        username,
+        os_name,
+        os_version,
+        os_arch,
+        cpu_info,
+        memory_total_gb,
+        memory_available_gb,
+        disk_info,
+        uptime_hours,
+        local_ip,
+        public_ip,
+        network_interfaces,
+        timezone,
+        locale,
+        is_virtual_machine,
+        virtual_machine_vendor,
     })
 }
 
@@ -239,29 +307,44 @@ fn get_os_details() -> (String, String) {
             use windows::core::BSTR;
             use windows::Win32::System::Wmi::IEnumWbemClassObject;
             let enumerator: IEnumWbemClassObject = unsafe {
-                services.ExecQuery(&BSTR::from("WQL"), &BSTR::from("SELECT Caption, Version, BuildNumber FROM Win32_OperatingSystem"), WBEM_FLAG_FORWARD_ONLY, None)
-            }.ok()?;
+                services.ExecQuery(
+                    &BSTR::from("WQL"),
+                    &BSTR::from("SELECT Caption, Version, BuildNumber FROM Win32_OperatingSystem"),
+                    WBEM_FLAG_FORWARD_ONLY,
+                    None,
+                )
+            }
+            .ok()?;
             let mut arr = [None];
             let mut returned = 0;
-            if unsafe { enumerator.Next(WBEM_INFINITE, &mut arr, &mut returned) }.is_err() || returned == 0 { return None; }
+            if unsafe { enumerator.Next(WBEM_INFINITE, &mut arr, &mut returned) }.is_err()
+                || returned == 0
+            {
+                return None;
+            }
             if let Some(obj) = &arr[0] {
                 let caption = read_bstr_property(obj, "Caption");
                 let version = read_bstr_property(obj, "Version");
                 let build = read_bstr_property(obj, "BuildNumber");
                 let s = if !caption.is_empty() && !version.is_empty() && !build.is_empty() {
                     format!("{} {} (Build {})", caption, version, build)
-                } else if !caption.is_empty() && !version.is_empty() { format!("{} {}", caption, version) }
-                else if !version.is_empty() { version } else { String::from("Windows Unknown") };
+                } else if !caption.is_empty() && !version.is_empty() {
+                    format!("{} {}", caption, version)
+                } else if !version.is_empty() {
+                    version
+                } else {
+                    String::from("Windows Unknown")
+                };
                 return Some(s);
             }
             None
-        }).unwrap_or_else(|| "Windows Unknown".to_string());
+        })
+        .unwrap_or_else(|| "Windows Unknown".to_string());
         (ver, std::env::consts::ARCH.to_string())
     }
     #[cfg(not(windows))]
     {
-        let version = execute_command("uname", &["-r"])
-            .unwrap_or_else(|| "Unknown".to_string());
+        let version = execute_command("uname", &["-r"]).unwrap_or_else(|| "Unknown".to_string());
         (version, std::env::consts::ARCH.to_string())
     }
 }
@@ -275,17 +358,30 @@ fn get_cpu_info() -> String {
             use windows::core::BSTR;
             use windows::Win32::System::Wmi::IEnumWbemClassObject;
             let enumerator: IEnumWbemClassObject = unsafe {
-                services.ExecQuery(&BSTR::from("WQL"), &BSTR::from("SELECT Name FROM Win32_Processor"), WBEM_FLAG_FORWARD_ONLY, None)
-            }.ok()?;
+                services.ExecQuery(
+                    &BSTR::from("WQL"),
+                    &BSTR::from("SELECT Name FROM Win32_Processor"),
+                    WBEM_FLAG_FORWARD_ONLY,
+                    None,
+                )
+            }
+            .ok()?;
             let mut arr = [None];
             let mut returned = 0;
-            if unsafe { enumerator.Next(WBEM_INFINITE, &mut arr, &mut returned) }.is_err() || returned == 0 { return None; }
+            if unsafe { enumerator.Next(WBEM_INFINITE, &mut arr, &mut returned) }.is_err()
+                || returned == 0
+            {
+                return None;
+            }
             if let Some(obj) = &arr[0] {
                 let s = read_bstr_property(obj, "Name");
-                if !s.is_empty() { return Some(s); }
+                if !s.is_empty() {
+                    return Some(s);
+                }
             }
             None
-        }).unwrap_or_else(|| "Unknown CPU".to_string());
+        })
+        .unwrap_or_else(|| "Unknown CPU".to_string());
         name
     }
     #[cfg(not(windows))]
@@ -293,7 +389,8 @@ fn get_cpu_info() -> String {
         std::fs::read_to_string("/proc/cpuinfo")
             .ok()
             .and_then(|content| {
-                content.lines()
+                content
+                    .lines()
                     .find(|line| line.starts_with("model name"))
                     .and_then(|line| line.split(':').nth(1))
                     .map(|name| name.trim().to_string())
@@ -329,27 +426,52 @@ fn get_disk_info() -> Vec<DiskInfo> {
     #[cfg(windows)]
     {
         use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetVolumeInformationW, GetDriveTypeW};
+        use windows::Win32::Storage::FileSystem::{
+            GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW,
+        };
         let mut disks = Vec::new();
         for letter in b'A'..=b'Z' {
             let root = format!("{}:\\", letter as char);
             let w: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
             unsafe {
-                if GetDriveTypeW(PCWSTR(w.as_ptr())) != 3 { continue; } // 3 == DRIVE_FIXED
+                if GetDriveTypeW(PCWSTR(w.as_ptr())) != 3 {
+                    continue;
+                } // 3 == DRIVE_FIXED
                 let mut free_bytes_avail = 0u64;
                 let mut total_bytes = 0u64;
                 let mut total_free = 0u64;
-                if GetDiskFreeSpaceExW(PCWSTR(w.as_ptr()), Some(&mut free_bytes_avail), Some(&mut total_bytes), Some(&mut total_free)).is_ok() {
+                if GetDiskFreeSpaceExW(
+                    PCWSTR(w.as_ptr()),
+                    Some(&mut free_bytes_avail),
+                    Some(&mut total_bytes),
+                    Some(&mut total_free),
+                )
+                .is_ok()
+                {
                     let mut fs_name: [u16; 64] = [0; 64];
-                    let _ = GetVolumeInformationW(PCWSTR(w.as_ptr()), None, None, None, None, Some(&mut fs_name));
-                    let fs = String::from_utf16_lossy(&fs_name).trim_end_matches('\u{0}').to_string();
+                    let _ = GetVolumeInformationW(
+                        PCWSTR(w.as_ptr()),
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(&mut fs_name),
+                    );
+                    let fs = String::from_utf16_lossy(&fs_name)
+                        .trim_end_matches('\u{0}')
+                        .to_string();
                     if total_bytes > 0 {
                         let total_gb = total_bytes as f64 / 1_073_741_824.0;
                         let free_gb = total_free as f64 / 1_073_741_824.0;
-                        let used_percentage = ((total_bytes - total_free) as f64 / total_bytes as f64) * 100.0;
+                        let used_percentage =
+                            ((total_bytes - total_free) as f64 / total_bytes as f64) * 100.0;
                         disks.push(DiskInfo {
                             drive_letter: root.trim_end_matches('\\').to_string(),
-                            file_system: if fs.is_empty() { "Unknown".to_string() } else { fs },
+                            file_system: if fs.is_empty() {
+                                "Unknown".to_string()
+                            } else {
+                                fs
+                            },
                             total_size_gb: total_gb,
                             free_space_gb: free_gb,
                             used_percentage,
@@ -358,7 +480,11 @@ fn get_disk_info() -> Vec<DiskInfo> {
                 }
             }
         }
-        if disks.is_empty() { get_windows_disk_info().unwrap_or_default() } else { disks }
+        if disks.is_empty() {
+            get_windows_disk_info().unwrap_or_default()
+        } else {
+            disks
+        }
     }
     #[cfg(not(windows))]
     {
@@ -426,8 +552,13 @@ fn get_network_interfaces() -> Vec<NetworkInterface> {
     #[cfg(windows)]
     {
         use windows::core::PWSTR;
-        use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH, GET_ADAPTERS_ADDRESSES_FLAGS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_DNS_SERVER};
-        use windows::Win32::Networking::WinSock::{WSAStartup, WSACleanup, WSADATA, WSAAddressToStringW, SOCKADDR};
+        use windows::Win32::NetworkManagement::IpHelper::{
+            GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+            GAA_FLAG_SKIP_MULTICAST, GET_ADAPTERS_ADDRESSES_FLAGS, IP_ADAPTER_ADDRESSES_LH,
+        };
+        use windows::Win32::Networking::WinSock::{
+            WSAAddressToStringW, WSACleanup, WSAStartup, SOCKADDR, WSADATA,
+        };
 
         // Initialize Winsock (best-effort)
         unsafe {
@@ -436,14 +567,21 @@ fn get_network_interfaces() -> Vec<NetworkInterface> {
         }
 
         let mut size: u32 = 0;
-        let flags: GET_ADAPTERS_ADDRESSES_FLAGS = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
-        unsafe { let _ = GetAdaptersAddresses(0, flags, None, None, &mut size); }
-        if size == 0 { return Vec::new(); }
+        let flags: GET_ADAPTERS_ADDRESSES_FLAGS =
+            GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+        unsafe {
+            let _ = GetAdaptersAddresses(0, flags, None, None, &mut size);
+        }
+        if size == 0 {
+            return Vec::new();
+        }
 
         let mut buf = vec![0u8; size as usize];
         let first = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
         let ret = unsafe { GetAdaptersAddresses(0, flags, None, Some(first), &mut size) };
-        if ret != 0 { return Vec::new(); }
+        if ret != 0 {
+            return Vec::new();
+        }
 
         let mut out = Vec::new();
         unsafe {
@@ -452,7 +590,10 @@ fn get_network_interfaces() -> Vec<NetworkInterface> {
                 let a = &*ptr;
 
                 // Friendly name
-                let name = a.FriendlyName.to_string().unwrap_or_else(|_| String::from("Unknown"));
+                let name = a
+                    .FriendlyName
+                    .to_string()
+                    .unwrap_or_else(|_| String::from("Unknown"));
 
                 // MAC address
                 let mac_len = a.PhysicalAddressLength as usize;
@@ -460,15 +601,19 @@ fn get_network_interfaces() -> Vec<NetworkInterface> {
                 let mac_address = if mac_bytes.is_empty() {
                     String::new()
                 } else {
-                    mac_bytes.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(":")
+                    mac_bytes
+                        .iter()
+                        .map(|b| format!("{:02X}", b))
+                        .collect::<Vec<_>>()
+                        .join(":")
                 };
 
                 // Interface type (simple mapping)
                 let iftype = a.IfType; // u32
                 let interface_type = match iftype {
-                    6 => "Ethernet".to_string(),       // IF_TYPE_ETHERNET_CSMACD
-                    71 => "WiFi".to_string(),          // IF_TYPE_IEEE80211
-                    24 => "Loopback".to_string(),      // IF_TYPE_SOFTWARE_LOOPBACK
+                    6 => "Ethernet".to_string(),  // IF_TYPE_ETHERNET_CSMACD
+                    71 => "WiFi".to_string(),     // IF_TYPE_IEEE80211
+                    24 => "Loopback".to_string(), // IF_TYPE_SOFTWARE_LOOPBACK
                     _ => format!("IFTYPE({})", iftype),
                 };
 
@@ -488,19 +633,27 @@ fn get_network_interfaces() -> Vec<NetworkInterface> {
                             &mut len,
                         );
                         if rc == 0 {
-                            ip_address = String::from_utf16_lossy(&bufw[..len as usize]).to_string();
+                            ip_address =
+                                String::from_utf16_lossy(&bufw[..len as usize]).to_string();
                             break;
                         }
                     }
                     uni = u.Next;
                 }
 
-                out.push(NetworkInterface { name, ip_address, mac_address, interface_type });
+                out.push(NetworkInterface {
+                    name,
+                    ip_address,
+                    mac_address,
+                    interface_type,
+                });
                 ptr = a.Next;
             }
         }
         // Cleanup Winsock
-        unsafe { let _ = WSACleanup(); }
+        unsafe {
+            let _ = WSACleanup();
+        }
         out
     }
     #[cfg(not(windows))]
@@ -529,8 +682,14 @@ fn get_timezone() -> String {
         unsafe {
             let mut tzi: TIME_ZONE_INFORMATION = std::mem::zeroed();
             let _ = GetTimeZoneInformation(&mut tzi);
-            let name = String::from_utf16_lossy(&tzi.StandardName).trim_end_matches('\u{0}').to_string();
-            if name.is_empty() { "UTC".to_string() } else { name }
+            let name = String::from_utf16_lossy(&tzi.StandardName)
+                .trim_end_matches('\u{0}')
+                .to_string();
+            if name.is_empty() {
+                "UTC".to_string()
+            } else {
+                name
+            }
         }
     }
     #[cfg(not(windows))]
@@ -548,31 +707,40 @@ fn get_locale() -> String {
 #[cfg(windows)]
 fn get_windows_disk_info() -> Option<Vec<DiskInfo>> {
     use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW};
+    use windows::Win32::Storage::FileSystem::{
+        GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW,
+    };
 
     let mut disks = Vec::new();
 
     for letter in b'A'..=b'Z' {
-        let root_utf16: Vec<u16> = format!("{}:\\", letter as char).encode_utf16().chain(std::iter::once(0)).collect();
+        let root_utf16: Vec<u16> = format!("{}:\\", letter as char)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let root_pcw = PCWSTR(root_utf16.as_ptr());
         unsafe {
             let dtype = GetDriveTypeW(root_pcw);
             // DRIVE_FIXED == 3
-            if dtype != 3 { continue; }
+            if dtype != 3 {
+                continue;
+            }
 
             let mut free_avail: u64 = 0;
             let mut total: u64 = 0;
             let mut total_free: u64 = 0;
-            if GetDiskFreeSpaceExW(root_pcw, Some(&mut free_avail), Some(&mut total), Some(&mut total_free)).is_ok() {
+            if GetDiskFreeSpaceExW(
+                root_pcw,
+                Some(&mut free_avail),
+                Some(&mut total),
+                Some(&mut total_free),
+            )
+            .is_ok()
+            {
                 let mut fs_name_buf = [0u16; 64];
-                let fs_ok = GetVolumeInformationW(
-                    root_pcw,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(&mut fs_name_buf),
-                ).is_ok();
+                let fs_ok =
+                    GetVolumeInformationW(root_pcw, None, None, None, None, Some(&mut fs_name_buf))
+                        .is_ok();
                 let file_system = if fs_ok {
                     let s = String::from_utf16_lossy(&fs_name_buf);
                     s.trim_matches('\u{0}').to_string()
@@ -597,7 +765,11 @@ fn get_windows_disk_info() -> Option<Vec<DiskInfo>> {
         }
     }
 
-    if disks.is_empty() { None } else { Some(disks) }
+    if disks.is_empty() {
+        None
+    } else {
+        Some(disks)
+    }
 }
 
 fn is_valid_ip(ip: &str) -> bool {
@@ -611,11 +783,21 @@ fn detect_virtual_machine() -> Option<String> {
         use windows::core::BSTR;
         use windows::Win32::System::Wmi::IEnumWbemClassObject;
         let enumerator: IEnumWbemClassObject = unsafe {
-            services.ExecQuery(&BSTR::from("WQL"), &BSTR::from("SELECT Manufacturer, Model FROM Win32_ComputerSystem"), WBEM_FLAG_FORWARD_ONLY, None)
-        }.ok()?;
+            services.ExecQuery(
+                &BSTR::from("WQL"),
+                &BSTR::from("SELECT Manufacturer, Model FROM Win32_ComputerSystem"),
+                WBEM_FLAG_FORWARD_ONLY,
+                None,
+            )
+        }
+        .ok()?;
         let mut arr = [None];
         let mut returned = 0;
-        if unsafe { enumerator.Next(WBEM_INFINITE, &mut arr, &mut returned) }.is_err() || returned == 0 { return None; }
+        if unsafe { enumerator.Next(WBEM_INFINITE, &mut arr, &mut returned) }.is_err()
+            || returned == 0
+        {
+            return None;
+        }
         if let Some(obj) = &arr[0] {
             let manufacturer_raw = read_bstr_property(obj, "Manufacturer");
             let model_raw = read_bstr_property(obj, "Model");
@@ -627,28 +809,46 @@ fn detect_virtual_machine() -> Option<String> {
                 Some("VMware".to_string())
             } else if manufacturer == "microsoft corporation" && model_upper.contains("VIRTUAL") {
                 Some("Microsoft Hyper-V".to_string())
-            } else if manufacturer.contains("innotek") || manufacturer.contains("oracle") || model_lower.contains("virtualbox") {
+            } else if manufacturer.contains("innotek")
+                || manufacturer.contains("oracle")
+                || model_lower.contains("virtualbox")
+            {
                 Some("Oracle VirtualBox".to_string())
             } else if manufacturer.contains("parallels") || model_lower.contains("parallels") {
                 Some("Parallels Desktop".to_string())
-            } else if manufacturer.contains("qemu") || manufacturer.contains("red hat") || model_upper.contains("KVM") {
+            } else if manufacturer.contains("qemu")
+                || manufacturer.contains("red hat")
+                || model_upper.contains("KVM")
+            {
                 Some("KVM/QEMU".to_string())
             } else if manufacturer.contains("xen") || model_lower.contains("xen") {
                 Some("Xen".to_string())
             } else if manufacturer.contains("bochs") || model_lower.contains("bochs") {
                 Some("Bochs".to_string())
             } else if manufacturer.contains("virtual") || model_lower.contains("virtual") {
-                let fallback = if !model_raw.is_empty() { model_raw } else { manufacturer_raw };
-                if fallback.is_empty() { None } else { Some(fallback) }
+                let fallback = if !model_raw.is_empty() {
+                    model_raw
+                } else {
+                    manufacturer_raw
+                };
+                if fallback.is_empty() {
+                    None
+                } else {
+                    Some(fallback)
+                }
             } else {
                 None
             };
 
-            if let Some(vendor_name) = vendor { return Some(vendor_name); }
+            if let Some(vendor_name) = vendor {
+                return Some(vendor_name);
+            }
         }
         None
     })
 }
 
 #[cfg(not(windows))]
-fn detect_virtual_machine() -> Option<String> { None }
+fn detect_virtual_machine() -> Option<String> {
+    None
+}

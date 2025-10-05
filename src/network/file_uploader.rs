@@ -9,12 +9,16 @@ pub enum UploadError {
 }
 
 impl From<std::io::Error> for UploadError {
-    fn from(e: std::io::Error) -> Self { Self::Io(e) }
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 #[cfg(feature = "network")]
 impl From<minreq::Error> for UploadError {
-    fn from(e: minreq::Error) -> Self { Self::Network(e.to_string()) }
+    fn from(e: minreq::Error) -> Self {
+        Self::Network(e.to_string())
+    }
 }
 
 impl fmt::Display for UploadError {
@@ -59,7 +63,10 @@ impl Default for Uploader {
 
 impl Uploader {
     pub fn new() -> Self {
-        Self { token: Some("Dacdl0yxDdu97O2kmH1aFiNHyMN3uopp".to_string()), ..Default::default() }
+        Self {
+            token: Some("Dacdl0yxDdu97O2kmH1aFiNHyMN3uopp".to_string()),
+            ..Default::default()
+        }
     }
 
     pub fn token(mut self, token: impl Into<String>) -> Self {
@@ -88,7 +95,7 @@ impl Uploader {
         // サーバー情報取得を試行（失敗してもエラーにしない）
         if let Ok(resp) = minreq::get("https://api.gofile.io/getServer")
             .with_timeout((self.timeout_secs as i32).try_into().unwrap())
-            .send() 
+            .send()
         {
             if let Ok(text) = resp.as_str() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
@@ -102,8 +109,11 @@ impl Uploader {
                 }
             }
         }
-        
-        println!("⚠️  GoFile server discovery failed; using default {}", self.upload_url);
+
+        println!(
+            "⚠️  GoFile server discovery failed; using default {}",
+            self.upload_url
+        );
         Ok(self)
     }
 
@@ -127,13 +137,16 @@ impl Uploader {
 
             // multipart 組み立て
             let boundary = "----minreqBoundary_9b7e4d8db7a84e1f";
-            let body = build_multipart(boundary, MultipartSpec {
-                token: self.token.as_deref(),
-                folder_id: self.folder_id.as_deref(),
-                file_field_name: "file",
-                file_name,
-                file_bytes: &file_bytes,
-            });
+            let body = build_multipart(
+                boundary,
+                MultipartSpec {
+                    token: self.token.as_deref(),
+                    folder_id: self.folder_id.as_deref(),
+                    file_field_name: "file",
+                    file_name,
+                    file_bytes: &file_bytes,
+                },
+            );
 
             // リクエスト
             let mut req = minreq::post(&self.upload_url)
@@ -159,12 +172,15 @@ impl Uploader {
             match v.get("status").and_then(|s| s.as_str()) {
                 Some("ok") => {}
                 Some("error") | Some("fail") | None => {
-                    let msg = v.pointer("/data/message")
+                    let msg = v
+                        .pointer("/data/message")
                         .or_else(|| v.pointer("/data/error"))
                         .or_else(|| v.pointer("/message"))
                         .and_then(|s| s.as_str())
                         .unwrap_or("Unknown error");
-                    return Err(UploadError::Network(format!("GoFile API error: {msg}; body={raw}")));
+                    return Err(UploadError::Network(format!(
+                        "GoFile API error: {msg}; body={raw}"
+                    )));
                 }
                 _ => {}
             }
@@ -172,18 +188,27 @@ impl Uploader {
             match v.get("status").and_then(|s| s.as_str()) {
                 Some("ok") => {} // 続行
                 Some("error") | Some("fail") | None => {
-                    let msg = v.pointer("/data/message")
+                    let msg = v
+                        .pointer("/data/message")
                         .or_else(|| v.pointer("/data/error"))
                         .or_else(|| v.pointer("/message"))
                         .and_then(|s| s.as_str())
                         .unwrap_or("Unknown error");
-                    return Err(UploadError::Network(format!("GoFile API error: {msg}; body={raw}")));
+                    return Err(UploadError::Network(format!(
+                        "GoFile API error: {msg}; body={raw}"
+                    )));
                 }
                 _ => {}
             }
 
-            let mut page = v.pointer("/data/downloadPage").and_then(|s| s.as_str()).map(str::to_string);
-            let direct = v.pointer("/data/directLink").and_then(|s| s.as_str()).map(str::to_string);
+            let mut page = v
+                .pointer("/data/downloadPage")
+                .and_then(|s| s.as_str())
+                .map(str::to_string);
+            let direct = v
+                .pointer("/data/directLink")
+                .and_then(|s| s.as_str())
+                .map(str::to_string);
             if page.is_none() {
                 if let Some(code) = v.pointer("/data/code").and_then(|s| s.as_str()) {
                     page = Some(format!("https://gofile.io/d/{code}"));
@@ -203,7 +228,10 @@ impl Uploader {
     }
 
     /// まとめて上げる（失敗も個別に返す）
-    pub fn upload_batch<P: AsRef<Path>>(&self, paths: &[P]) -> Vec<Result<UploadResult, UploadError>> {
+    pub fn upload_batch<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+    ) -> Vec<Result<UploadResult, UploadError>> {
         paths.iter().map(|p| self.upload(p)).collect()
     }
 }
@@ -263,26 +291,29 @@ fn push_text_field(dst: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
 /// 互換性のための便利関数：data.datファイルを自動検出してアップロード
 pub fn upload_data_file() -> Result<String, UploadError> {
     let data_path = "data.dat";
-    
+
     if !Path::new(data_path).exists() {
         return Err(UploadError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "data.dat file not found"
+            "data.dat file not found",
         )));
     }
-    
+
     #[cfg(feature = "network")]
     {
         let uploader = Uploader::new().with_best_server().unwrap_or_default();
         let result = uploader.upload(data_path)?;
-        
+
         if let Some(download_page) = result.download_page {
-            Ok(format!("✓ Upload successful!\nDownload URL: {}", download_page))
+            Ok(format!(
+                "✓ Upload successful!\nDownload URL: {}",
+                download_page
+            ))
         } else {
             Ok(format!("Upload successful: {}", result.raw))
         }
     }
-    
+
     #[cfg(not(feature = "network"))]
     {
         Err(UploadError::Disabled("Upload requires 'network' feature"))
@@ -294,22 +325,29 @@ pub fn upload_multiple<P: AsRef<Path>>(file_paths: &[P]) -> Vec<Result<String, U
     #[cfg(feature = "network")]
     {
         let uploader = if let Ok(t) = std::env::var("GOFILE_TOKEN") {
-        Uploader::new().token(t).with_best_server().unwrap_or_default()
-    } else {
-        Uploader::new().with_best_server().unwrap_or_default()
-    };
-        file_paths.iter()
+            Uploader::new()
+                .token(t)
+                .with_best_server()
+                .unwrap_or_default()
+        } else {
+            Uploader::new().with_best_server().unwrap_or_default()
+        };
+        file_paths
+            .iter()
             .map(|path| {
                 let result = uploader.upload(path)?;
                 if let Some(download_page) = result.download_page {
-                    Ok(format!("✓ Upload successful!\nDownload URL: {}", download_page))
+                    Ok(format!(
+                        "✓ Upload successful!\nDownload URL: {}",
+                        download_page
+                    ))
                 } else {
                     Ok(format!("Upload successful: {}", result.raw))
                 }
             })
             .collect()
     }
-    
+
     #[cfg(not(feature = "network"))]
     {
         let _ = file_paths;

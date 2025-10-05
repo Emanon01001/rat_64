@@ -1,13 +1,13 @@
 // スクリーンショットデータ構造体
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 // screen_captureのインポートは必要時に関数内で行う
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ScreenshotData {
-    pub primary_display: Option<String>,      // Base64エンコードされたプライマリディスプレイ
-    pub all_displays: Vec<String>,            // Base64エンコードされた全ディスプレイ
-    pub capture_time: String,                 // キャプチャ時刻
-    pub total_count: usize,                   // 取得したスクリーンショット数
+    pub primary_display: Option<String>, // Base64エンコードされたプライマリディスプレイ
+    pub all_displays: Vec<String>,       // Base64エンコードされた全ディスプレイ
+    pub capture_time: String,            // キャプチャ時刻
+    pub total_count: usize,              // 取得したスクリーンショット数
 }
 
 impl Default for ScreenshotData {
@@ -27,9 +27,9 @@ pub fn collect_screenshots(config: &crate::Config) -> ScreenshotData {
     if !config.collect_screenshots {
         return ScreenshotData::default();
     }
-    
+
     use crate::utils::screen_capture::{capture_all_displays, ScreenshotConfig};
-    
+
     match capture_all_displays(&ScreenshotConfig::default()) {
         Ok(screenshot_data) => {
             let total_count = screenshot_data.len();
@@ -39,7 +39,7 @@ pub fn collect_screenshots(config: &crate::Config) -> ScreenshotData {
                 capture_time: format!("{:?}", std::time::SystemTime::now()),
                 total_count,
             }
-        },
+        }
         Err(_) => ScreenshotData::default(),
     }
 }

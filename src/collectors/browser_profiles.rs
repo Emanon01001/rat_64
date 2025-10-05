@@ -1,13 +1,16 @@
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
 use std::env;
+use std::path::{Path, PathBuf};
 
 /// Get default Firefox profile path for current platform
 fn get_default_profile_path() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         if let Some(appdata) = env::var_os("APPDATA") {
-            PathBuf::from(appdata).join("Mozilla").join("Firefox").join("Profiles")
+            PathBuf::from(appdata)
+                .join("Mozilla")
+                .join("Firefox")
+                .join("Profiles")
         } else {
             PathBuf::from(".")
         }
@@ -15,7 +18,11 @@ fn get_default_profile_path() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = env::var_os("HOME") {
-            PathBuf::from(home).join("Library").join("Application Support").join("Firefox").join("Profiles")
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("Firefox")
+                .join("Profiles")
         } else {
             PathBuf::from(".")
         }
@@ -36,53 +43,52 @@ fn get_default_profile_path() -> PathBuf {
 
 /// Get the default profile path (first available profile)
 pub fn get_default_profile() -> Result<PathBuf> {
-    get_profile_path(None, false, Some("default".to_string()), false)
-        .or_else(|_| {
-            // fallback: try to get any profile automatically
-            let base = get_default_profile_path();
-            let profile_ini = base.join("profiles.ini");
-            if profile_ini.exists() {
-                // Try to parse profiles.ini and get the first profile
-                get_first_available_profile()
-            } else {
-                // Use base directory as profile
-                Ok(base)
-            }
-        })
+    get_profile_path(None, false, Some("default".to_string()), false).or_else(|_| {
+        // fallback: try to get any profile automatically
+        let base = get_default_profile_path();
+        let profile_ini = base.join("profiles.ini");
+        if profile_ini.exists() {
+            // Try to parse profiles.ini and get the first profile
+            get_first_available_profile()
+        } else {
+            // Use base directory as profile
+            Ok(base)
+        }
+    })
 }
 
 /// Get the first available profile from profiles.ini
 fn get_first_available_profile() -> Result<PathBuf> {
     let base = get_default_profile_path();
     let profile_ini = base.join("profiles.ini");
-    
+
     if !profile_ini.exists() {
         return Ok(base);
     }
-    
+
     let contents = std::fs::read_to_string(&profile_ini)
         .with_context(|| format!("Failed to read {}", profile_ini.display()))?;
-    
+
     // Simple profiles.ini parser - look for first Profile section
     let mut in_profile_section = false;
     let mut profile_path: Option<String> = None;
     let mut is_relative = true;
-    
+
     for line in contents.lines() {
         let line = line.trim();
-        
+
         if line.starts_with('[') && line.ends_with(']') {
             in_profile_section = line.starts_with("[Profile");
             continue;
         }
-        
+
         if in_profile_section {
             if let Some(path_line) = line.strip_prefix("Path=") {
                 profile_path = Some(path_line.to_string());
             } else if let Some(relative_line) = line.strip_prefix("IsRelative=") {
                 is_relative = relative_line == "1";
             }
-            
+
             // If we have both path and relative info, we can construct the full path
             if let Some(ref path) = profile_path {
                 let full_path = if is_relative {
@@ -90,21 +96,26 @@ fn get_first_available_profile() -> Result<PathBuf> {
                 } else {
                     PathBuf::from(path)
                 };
-                
+
                 if full_path.exists() {
                     return Ok(full_path);
                 }
             }
         }
     }
-    
+
     // Fallback to base directory
     Ok(base)
 }
 
 /// Read profiles.ini and pick profile or treat provided path as direct profile folder.
 /// This mirrors the Python `get_profile` behaviour at high level.
-pub fn get_profile_path(profile_arg: Option<&Path>, interactive: bool, choice: Option<String>, list: bool) -> Result<PathBuf> {
+pub fn get_profile_path(
+    profile_arg: Option<&Path>,
+    interactive: bool,
+    choice: Option<String>,
+    list: bool,
+) -> Result<PathBuf> {
     let base = match profile_arg {
         Some(path) => {
             // shellexpand::tildeを標準ライブラリで置換
@@ -132,7 +143,10 @@ pub fn get_profile_path(profile_arg: Option<&Path>, interactive: bool, choice: O
             anyhow::bail!("Listing single profile not permitted when profiles.ini is missing");
         }
         if !base.is_dir() {
-            anyhow::bail!("Provided profile path is not a directory: {}", base.display());
+            anyhow::bail!(
+                "Provided profile path is not a directory: {}",
+                base.display()
+            );
         }
         return Ok(base.to_path_buf());
     }
@@ -140,17 +154,17 @@ pub fn get_profile_path(profile_arg: Option<&Path>, interactive: bool, choice: O
     let content = std::fs::read_to_string(&profile_ini).context("failed to read profiles.ini")?;
     let mut sections = Vec::new();
     let mut current_section = String::new();
-    
+
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
             continue;
         }
-        
+
         if line.starts_with('[') && line.ends_with(']') {
-            current_section = line[1..line.len()-1].to_string();
+            current_section = line[1..line.len() - 1].to_string();
         } else if current_section.starts_with("Profile") && line.starts_with("Path=") {
-            let path = &line[5..];  // Skip "Path="
+            let path = &line[5..]; // Skip "Path="
             sections.push(path.to_string());
         }
     }
@@ -161,7 +175,7 @@ pub fn get_profile_path(profile_arg: Option<&Path>, interactive: bool, choice: O
 
     if list {
         for _p in sections.iter() {
-        let _ = ();
+            let _ = ();
         }
         std::process::exit(0);
     }
@@ -180,7 +194,7 @@ pub fn get_profile_path(profile_arg: Option<&Path>, interactive: bool, choice: O
         // simple interactive prompt (not robust) - in real code present a better UI
         let _ = ();
         for _p in sections.iter() {
-        let _ = ();
+            let _ = ();
         }
         use std::io::{self, Write};
         print!("Choice: ");
@@ -193,7 +207,10 @@ pub fn get_profile_path(profile_arg: Option<&Path>, interactive: bool, choice: O
 
     let profile_path = base.join(chosen);
     if !profile_path.is_dir() {
-        anyhow::bail!("Resolved profile path is not a directory: {}", profile_path.display());
+        anyhow::bail!(
+            "Resolved profile path is not a directory: {}",
+            profile_path.display()
+        );
     }
 
     Ok(profile_path)

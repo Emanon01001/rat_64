@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::Deserialize;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 
 #[cfg(feature = "browser")]
 use rusqlite;
@@ -31,15 +31,15 @@ impl NssCredentials {
     pub fn new(profile_path: PathBuf) -> Self {
         Self { profile_path }
     }
-    
+
     /// Get decrypted logins from the Firefox profile
     pub fn get_decrypted_logins(&self) -> Result<Vec<DecryptedLogin>> {
         let mut decrypted_logins = Vec::new();
-        
+
         // Initialize NSS
         let nss = Nss::new()?;
         nss.initialize(&self.profile_path)?;
-        
+
         // Try JSON credentials first
         let json_path = self.profile_path.join("logins.json");
         if json_path.exists() {
@@ -49,15 +49,17 @@ impl NssCredentials {
                         let username = if encrypted_username.is_empty() {
                             String::new()
                         } else {
-                            nss.decrypt(&encrypted_username).unwrap_or(encrypted_username)
+                            nss.decrypt(&encrypted_username)
+                                .unwrap_or(encrypted_username)
                         };
-                        
+
                         let password = if encrypted_password.is_empty() {
                             String::new()
                         } else {
-                            nss.decrypt(&encrypted_password).unwrap_or_else(|_| "[DECRYPT_FAILED]".to_string())
+                            nss.decrypt(&encrypted_password)
+                                .unwrap_or_else(|_| "[DECRYPT_FAILED]".to_string())
                         };
-                        
+
                         decrypted_logins.push(DecryptedLogin {
                             hostname,
                             username,
@@ -68,7 +70,7 @@ impl NssCredentials {
                 }
             }
         }
-        
+
         // Try SQLite credentials if browser feature is enabled
         #[cfg(feature = "browser")]
         {
@@ -80,15 +82,17 @@ impl NssCredentials {
                             let username = if encrypted_username.is_empty() {
                                 String::new()
                             } else {
-                                nss.decrypt(&encrypted_username).unwrap_or(encrypted_username)
+                                nss.decrypt(&encrypted_username)
+                                    .unwrap_or(encrypted_username)
                             };
-                            
+
                             let password = if encrypted_password.is_empty() {
                                 String::new()
                             } else {
-                                nss.decrypt(&encrypted_password).unwrap_or_else(|_| "[DECRYPT_FAILED]".to_string())
+                                nss.decrypt(&encrypted_password)
+                                    .unwrap_or_else(|_| "[DECRYPT_FAILED]".to_string())
                             };
-                            
+
                             decrypted_logins.push(DecryptedLogin {
                                 hostname,
                                 username,
@@ -100,10 +104,10 @@ impl NssCredentials {
                 }
             }
         }
-        
+
         // Shutdown NSS
         let _ = nss.shutdown();
-        
+
         Ok(decrypted_logins)
     }
 }
@@ -142,7 +146,14 @@ impl CredentialsBackend for JsonCredentials {
         Ok(parsed
             .logins
             .into_iter()
-            .map(|e| (e.hostname, e.encrypted_username, e.encrypted_password, e.enc_type))
+            .map(|e| {
+                (
+                    e.hostname,
+                    e.encrypted_username,
+                    e.encrypted_password,
+                    e.enc_type,
+                )
+            })
             .collect())
     }
 }
@@ -169,26 +180,28 @@ impl CredentialsBackend for SqliteCredentials {
             }
 
             let conn = rusqlite::Connection::open(&self.db_path)?;
-            
+
             let mut stmt = conn.prepare(
-                "SELECT hostname, encryptedUsername, encryptedPassword, encType FROM moz_logins"
+                "SELECT hostname, encryptedUsername, encryptedPassword, encType FROM moz_logins",
             )?;
 
             let mut results = Vec::new();
             let rows = stmt.query_map([], |row| {
                 Ok((
-                    row.get::<_, String>(0)?,  // hostname
-                    row.get::<_, String>(1)?,  // encryptedUsername  
-                    row.get::<_, String>(2)?,  // encryptedPassword
-                    row.get::<_, i32>(3)?,     // encType
+                    row.get::<_, String>(0)?, // hostname
+                    row.get::<_, String>(1)?, // encryptedUsername
+                    row.get::<_, String>(2)?, // encryptedPassword
+                    row.get::<_, i32>(3)?,    // encType
                 ))
             })?;
 
-            for login in rows.flatten() { results.push(login) }
+            for login in rows.flatten() {
+                results.push(login)
+            }
 
             Ok(results)
         }
-        
+
         #[cfg(not(feature = "browser"))]
         {
             anyhow::bail!("SQLite support not compiled in");

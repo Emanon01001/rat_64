@@ -1,13 +1,17 @@
 // 暗号化機能モジュール
-use aes_gcm::{Aes256Gcm, Nonce, aead::{Aead, KeyInit}};
+use crate::{RatError, RatResult};
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
 use rand::RngCore;
-use crate::{RatResult, RatError};
 
 // 非推奨関数を削除：generate_key_pair + encrypt_data_with_key を直接使用
 
 pub fn encrypt_data_with_key(data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> RatResult<Vec<u8>> {
     let cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(key));
-    cipher.encrypt(Nonce::from_slice(nonce), data)
+    cipher
+        .encrypt(Nonce::from_slice(nonce), data)
         .map_err(|e| RatError::Encryption(format!("Encryption failed: {:?}", e)))
 }
 

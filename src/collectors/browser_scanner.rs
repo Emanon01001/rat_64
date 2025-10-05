@@ -128,10 +128,10 @@ type ChromiumResult<T> = std::result::Result<T, ChromiumDumpError>;
 /// ブラウザの種類（Firefoxのみ）
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BrowserType {
-    Firefox,         // Firefox
-    FirefoxDev,      // Firefox Developer Edition
-    FirefoxNightly,  // Firefox Nightly
-    Thunderbird,     // Thunderbird（Firefoxベース）
+    Firefox,        // Firefox
+    FirefoxDev,     // Firefox Developer Edition
+    FirefoxNightly, // Firefox Nightly
+    Thunderbird,    // Thunderbird（Firefoxベース）
 }
 
 impl BrowserType {
@@ -148,7 +148,7 @@ impl BrowserType {
     /// ブラウザのユーザーデータディレクトリパスを取得
     pub fn user_data_path(&self) -> Option<PathBuf> {
         use BrowserType::*;
-        
+
         let (env_var, relative_path) = match self {
             // Firefoxベースブラウザのみ
             Firefox => ("APPDATA", r"Mozilla\Firefox"),
@@ -156,7 +156,7 @@ impl BrowserType {
             FirefoxNightly => ("APPDATA", r"Mozilla\Firefox Nightly"),
             Thunderbird => ("APPDATA", r"Thunderbird"),
         };
-        
+
         std::env::var(env_var)
             .ok()
             .map(|base| PathBuf::from(base).join(relative_path))
@@ -177,8 +177,8 @@ impl BrowserType {
 /// データベースの種類（Firefoxのみ）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DatabaseType {
-    FirefoxLoginData,   // Firefox用（logins.json）
-    FirefoxSignons,     // Firefox用（signons.sqlite）
+    FirefoxLoginData, // Firefox用（logins.json）
+    FirefoxSignons,   // Firefox用（signons.sqlite）
 }
 
 impl DatabaseType {
@@ -223,8 +223,13 @@ impl BrowserProfile {
 
     /// ブラウザがFirefoxベースかどうかを判定
     pub fn is_firefox_based(&self) -> bool {
-        matches!(self.browser_type, BrowserType::Firefox | BrowserType::FirefoxDev | 
-                 BrowserType::FirefoxNightly | BrowserType::Thunderbird)
+        matches!(
+            self.browser_type,
+            BrowserType::Firefox
+                | BrowserType::FirefoxDev
+                | BrowserType::FirefoxNightly
+                | BrowserType::Thunderbird
+        )
     }
 }
 
@@ -286,15 +291,16 @@ impl DatabaseResults {
 
     pub fn browser_stats(&self) -> HashMap<String, usize> {
         let mut stats = HashMap::new();
-        
+
         // ログインエントリとCookieエントリを統合してカウント
-        self.login_entries.iter()
+        self.login_entries
+            .iter()
             .map(|entry| &entry.browser_name)
             .chain(self.cookie_entries.iter().map(|entry| &entry.browser_name))
             .for_each(|browser_name| {
                 *stats.entry(browser_name.clone()).or_insert(0) += 1;
             });
-        
+
         stats
     }
 }
@@ -304,13 +310,11 @@ impl DatabaseResults {
 // Chromiumログインデータベース処理は削除されました
 
 /// Firefox専用ログインデータベースを処理（NSS復号化対応）
-pub fn process_firefox_database(
-    profile: &BrowserProfile,
-) -> ChromiumResult<Vec<LoginEntry>> {
+pub fn process_firefox_database(profile: &BrowserProfile) -> ChromiumResult<Vec<LoginEntry>> {
     let _ = ();
 
     let mut results = Vec::new();
-    
+
     // まずJSONファイルの存在を確認
     let json_path = profile.database_path(&DatabaseType::FirefoxLoginData);
     if !json_path.exists() {
@@ -354,14 +358,15 @@ pub fn process_firefox_database(
         }
         Err(_e) => {
             let _ = ();
-            
+
             // フォールバック: 暗号化されたデータの情報のみを表示
             for login in logins_array {
                 if let Some(hostname) = login.get("hostname").and_then(|v| v.as_str()) {
-                    let username = login.get("encryptedUsername")
+                    let username = login
+                        .get("encryptedUsername")
                         .and_then(|v| v.as_str())
                         .unwrap_or("[No username]");
-                        
+
                     results.push(LoginEntry {
                         browser_name: format!("{} [ENCRYPTED]", profile.browser_type.name()),
                         origin_url: hostname.to_string(),
@@ -381,31 +386,32 @@ pub fn process_firefox_database(
 
 /// NSS復号化を安全に実行
 fn safe_nss_decrypt_logins(
-    profile_path: &Path, 
-    logins_array: &[serde_json::Value]
+    profile_path: &Path,
+    logins_array: &[serde_json::Value],
 ) -> ChromiumResult<Vec<LoginEntry>> {
     use std::time::{Duration, Instant};
-    
+
     // NSS初期化の同期とタイムアウト機能
     static NSS_MUTEX: Mutex<()> = Mutex::new(());
     const NSS_TIMEOUT: Duration = Duration::from_secs(10);
-    
-    let _lock = NSS_MUTEX.try_lock()
-        .map_err(|_| ChromiumDumpError::Crypto("NSS is already in use by another process".to_string()))?;
-    
+
+    let _lock = NSS_MUTEX.try_lock().map_err(|_| {
+        ChromiumDumpError::Crypto("NSS is already in use by another process".to_string())
+    })?;
+
     let start_time = Instant::now();
-    
+
     // NSS初期化を段階的に実行
-    let nss = initialize_nss_safely(profile_path)
-        .map_err(|e| {
-            let _ = ();
-            ChromiumDumpError::Crypto(format!("NSS init failed: {}", e))
-        })?;
-    
+    let nss = initialize_nss_safely(profile_path).map_err(|e| {
+        let _ = ();
+        ChromiumDumpError::Crypto(format!("NSS init failed: {}", e))
+    })?;
+
     let (mut success_count, mut error_count) = (0, 0);
-    
+
     // タイムアウトチェック付きでログインを復号化
-    let results: Vec<_> = logins_array.iter()
+    let results: Vec<_> = logins_array
+        .iter()
         .take_while(|_| start_time.elapsed() <= NSS_TIMEOUT)
         .filter_map(|login| {
             match decrypt_firefox_login(&nss, login) {
@@ -422,79 +428,87 @@ fn safe_nss_decrypt_logins(
             }
         })
         .collect();
-    
+
     if start_time.elapsed() > NSS_TIMEOUT {
         let _ = ();
     }
-    
+
     // NSS安全シャットダウン
     if let Err(_e) = nss.shutdown() {
         let _ = ();
     }
-    
+
     let _ = ();
-    
+
     if results.is_empty() && error_count > 0 {
-        return Err(ChromiumDumpError::Crypto("All NSS decryption attempts failed".to_string()));
+        return Err(ChromiumDumpError::Crypto(
+            "All NSS decryption attempts failed".to_string(),
+        ));
     }
-    
+
     Ok(results)
 }
 
 /// NSS初期化を安全に実行
-fn initialize_nss_safely(profile_path: &Path) -> Result<crate::collectors::firefox_nss::Nss, Box<dyn std::error::Error>> {
+fn initialize_nss_safely(
+    profile_path: &Path,
+) -> Result<crate::collectors::firefox_nss::Nss, Box<dyn std::error::Error>> {
     let _ = ();
-    
+
     // NSS依存関係の事前チェック
     if !profile_path.is_dir() {
         return Err(format!("Invalid profile path: {:?}", profile_path).into());
     }
-    
+
     // 必要なNSSファイルの存在確認
     let nss_files = [
         ("cert9.db", "key4.db"), // SQLite形式のNSS
         ("cert8.db", "key3.db"), // レガシー形式のNSS
     ];
-    
-    let has_nss_files = nss_files.iter()
+
+    let has_nss_files = nss_files
+        .iter()
         .any(|(cert, key)| profile_path.join(cert).exists() || profile_path.join(key).exists());
-    
+
     if !has_nss_files {
         return Err("No NSS database files found in profile".into());
     }
-    
+
     // NSS 初期化を試行
     let nss = crate::collectors::firefox_nss::Nss::new()
         .map_err(|e| format!("Failed to load NSS library: {}", e))?;
-    
+
     nss.initialize(profile_path)
         .map_err(|e| format!("Failed to initialize NSS with profile: {}", e))?;
-    
+
     Ok(nss)
 }
 
 /// 個別のFirefoxログインエントリを復号化
 fn decrypt_firefox_login(
     nss: &crate::collectors::firefox_nss::Nss,
-    login: &serde_json::Value
+    login: &serde_json::Value,
 ) -> Result<Option<LoginEntry>, Box<dyn std::error::Error>> {
-    let hostname = login.get("hostname")
+    let hostname = login
+        .get("hostname")
         .and_then(|v| v.as_str())
         .ok_or("Missing hostname")?;
-    
-    let encrypted_username = login.get("encryptedUsername")
+
+    let encrypted_username = login
+        .get("encryptedUsername")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    
-    let encrypted_password = login.get("encryptedPassword")
+
+    let encrypted_password = login
+        .get("encryptedPassword")
         .and_then(|v| v.as_str())
         .ok_or("Missing encrypted password")?;
-    
+
     // 空の暗号化データはスキップ
     if encrypted_password.is_empty() {
         return Ok(None);
     }
-    
+
     // 復号化実行
     let decrypted_username = if encrypted_username.is_empty() {
         "[No username]".to_string()
@@ -502,33 +516,38 @@ fn decrypt_firefox_login(
         nss.decrypt(encrypted_username)
             .unwrap_or_else(|_| "[Decrypt failed]".to_string())
     };
-    
-    let decrypted_password = nss.decrypt(encrypted_password)
+
+    let decrypted_password = nss
+        .decrypt(encrypted_password)
         .map_err(|e| format!("Password decryption failed: {}", e))?;
-    
+
     // 日時情報の取得（オプション）
     #[cfg(feature = "datetime")]
-    let date_created = login.get("timeCreated")
+    let date_created = login
+        .get("timeCreated")
         .and_then(|v| v.as_u64())
         .map(|ts| chrono::DateTime::from_timestamp_millis(ts as i64))
         .flatten();
-    
+
     #[cfg(not(feature = "datetime"))]
-    let date_created = login.get("timeCreated")
+    let date_created = login
+        .get("timeCreated")
         .and_then(|v| v.as_u64())
         .map(|ts| ts as i64);
-    
+
     #[cfg(feature = "datetime")]
-    let date_last_used = login.get("timeLastUsed")
+    let date_last_used = login
+        .get("timeLastUsed")
         .and_then(|v| v.as_u64())
         .map(|ts| chrono::DateTime::from_timestamp_millis(ts as i64))
         .flatten();
-        
+
     #[cfg(not(feature = "datetime"))]
-    let date_last_used = login.get("timeLastUsed")
+    let date_last_used = login
+        .get("timeLastUsed")
         .and_then(|v| v.as_u64())
         .map(|ts| ts as i64);
-    
+
     Ok(Some(LoginEntry {
         browser_name: "Firefox".to_string(), // 呼び出し元で上書きされる
         origin_url: hostname.to_string(),

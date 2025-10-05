@@ -1,13 +1,13 @@
-use std::{
-    env,
-    ffi::{c_char, c_int, CString},  
-    path::{Path, PathBuf},
-    ptr,
-};
 use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::STANDARD as b64;
 use base64::Engine;
 use libloading::Library;
+use std::{
+    env,
+    ffi::{c_char, c_int, CString},
+    path::{Path, PathBuf},
+    ptr,
+};
 use which::which;
 
 type CUint = std::os::raw::c_uint;
@@ -30,14 +30,14 @@ pub fn load_libnss() -> Result<Library> {
 
     // Windows-only implementation
     let nssname = "nss3.dll";
-    
+
     // Add 32-bit locations first if not on 64-bit
     if !cfg!(target_pointer_width = "64") {
         locations.extend_from_slice(&[
             String::new(), // Current directory or system lib finder
             r"C:\Program Files (x86)\Mozilla Firefox".to_string(),
             r"C:\Program Files (x86)\Firefox Developer Edition".to_string(),
-            r"C:\Program Files (x86)\Mozilla Thunderbird".to_string(),  
+            r"C:\Program Files (x86)\Mozilla Thunderbird".to_string(),
             r"C:\Program Files (x86)\Nightly".to_string(),
             r"C:\Program Files (x86)\SeaMonkey".to_string(),
             r"C:\Program Files (x86)\Waterfox".to_string(),
@@ -53,8 +53,14 @@ pub fn load_libnss() -> Result<Library> {
     locations.extend_from_slice(&[
         String::new(), // Current directory or system lib finder
         format!("{}\\AppData\\Local\\Mozilla Firefox", home_dir.display()),
-        format!("{}\\AppData\\Local\\Firefox Developer Edition", home_dir.display()),
-        format!("{}\\AppData\\Local\\Mozilla Thunderbird", home_dir.display()),
+        format!(
+            "{}\\AppData\\Local\\Firefox Developer Edition",
+            home_dir.display()
+        ),
+        format!(
+            "{}\\AppData\\Local\\Mozilla Thunderbird",
+            home_dir.display()
+        ),
         format!("{}\\AppData\\Local\\Nightly", home_dir.display()),
         format!("{}\\AppData\\Local\\SeaMonkey", home_dir.display()),
         format!("{}\\AppData\\Local\\Waterfox", home_dir.display()),
@@ -100,7 +106,7 @@ fn find_nss(locations: Vec<String>) -> Result<Library> {
                 loc_path.join(nssname).display().to_string()
             }
         };
-        
+
         let _ = nsslib;
 
         // On Windows, manage PATH and working directory
@@ -132,7 +138,7 @@ fn find_nss(locations: Vec<String>) -> Result<Library> {
 
         // Try to load the library
         let nss_result = unsafe { Library::new(&nsslib) };
-        
+
         match nss_result {
             Ok(nss) => {
                 let _ = nsslib;
@@ -163,7 +169,8 @@ pub struct Nss {
     _lib: Library,
     nss_init: unsafe extern "C" fn(*const c_char) -> c_int,
     nss_shutdown: unsafe extern "C" fn() -> c_int,
-    pk11sdr_decrypt: unsafe extern "C" fn(*const SECItem, *mut SECItem, *mut std::ffi::c_void) -> c_int,
+    pk11sdr_decrypt:
+        unsafe extern "C" fn(*const SECItem, *mut SECItem, *mut std::ffi::c_void) -> c_int,
     secitem_zfree_item: unsafe extern "C" fn(*mut SECItem, c_int),
 }
 
@@ -194,15 +201,19 @@ impl Nss {
         let profile_str = format!("sql:{}", profile_path.display());
         let c_path = CString::new(profile_str.as_str())?;
         let _ = profile_str;
-        
+
         let result = unsafe { (self.nss_init)(c_path.as_ptr()) };
         let _ = result;
-        
+
         if result != SEC_SUCCESS {
-            return Err(anyhow!("NSS initialization failed with code {}. Is '{}' a valid Firefox profile?", result, profile_path.display()));
+            return Err(anyhow!(
+                "NSS initialization failed with code {}. Is '{}' a valid Firefox profile?",
+                result,
+                profile_path.display()
+            ));
         }
         let _ = profile_path;
-        
+
         Ok(())
     }
 
@@ -221,7 +232,7 @@ impl Nss {
         };
 
         let result = unsafe { (self.pk11sdr_decrypt)(&input, &mut output, ptr::null_mut()) };
-        
+
         if result != SEC_SUCCESS {
             return Err(anyhow!("Decryption failed with code {}. Credentials might be damaged or cert/key file mismatch.", result));
         }
@@ -230,12 +241,14 @@ impl Nss {
         let decrypted_data = if output.len == 0 || output.data.is_null() {
             Vec::new()
         } else {
-            unsafe { std::slice::from_raw_parts(output.data as *const u8, output.len as usize).to_vec() }
+            unsafe {
+                std::slice::from_raw_parts(output.data as *const u8, output.len as usize).to_vec()
+            }
         };
-        
+
         // Free the allocated memory
         unsafe { (self.secitem_zfree_item)(&mut output, 0) };
-        
+
         Ok(decrypted_data)
     }
 

