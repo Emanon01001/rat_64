@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use rmp_serde::decode::from_slice as from_msgpack_slice;
 
 // データ構造体のインポート
-use rat_64::{IntegratedPayload, ScreenshotData};
+use aoi_64::{IntegratedPayload, ScreenshotData};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();

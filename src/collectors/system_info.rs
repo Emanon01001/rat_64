@@ -1,6 +1,6 @@
-// システム情報収集モジュール
+﻿// システム情報収集モジュール
 // use std::process::Command; // 現状未使用
-use crate::RatResult;
+use crate::AoiResult;
 use serde::{Deserialize, Serialize};
 
 // 共通のWMIユーティリティ（Windows専用）
@@ -151,7 +151,7 @@ pub struct NetworkInterface {
 }
 
 // 効率的なシステム情報収集
-pub fn get_system_info() -> RatResult<SystemInfo> {
+pub fn get_system_info() -> AoiResult<SystemInfo> {
     // ホスト名（Windows: 環境変数、非Windows: HOSTNAME）
     #[cfg(windows)]
     let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Unknown".to_string());
@@ -209,7 +209,7 @@ pub fn get_system_info() -> RatResult<SystemInfo> {
 }
 
 // 非同期版（サイズ最小化のため、ブロッキング処理は spawn_blocking で並列化）
-pub async fn get_system_info_async() -> RatResult<SystemInfo> {
+pub async fn get_system_info_async() -> AoiResult<SystemInfo> {
     // すぐ取れる値は同期で取得
     #[cfg(windows)]
     let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Unknown".to_string());
@@ -239,34 +239,34 @@ pub async fn get_system_info_async() -> RatResult<SystemInfo> {
 
     let (os_version, os_arch) = h_os
         .await
-        .map_err(|e| crate::RatError::Command(format!("OS情報取得スレッドエラー: {}", e)))?;
+        .map_err(|e| crate::AoiError::Command(format!("OS情報取得スレッドエラー: {}", e)))?;
     let cpu_info = h_cpu
         .await
-        .map_err(|e| crate::RatError::Command(format!("CPU情報取得スレッドエラー: {}", e)))?;
+        .map_err(|e| crate::AoiError::Command(format!("CPU情報取得スレッドエラー: {}", e)))?;
     let (memory_total_gb, memory_available_gb) = h_mem
         .await
-        .map_err(|e| crate::RatError::Command(format!("メモリ情報取得スレッドエラー: {}", e)))?;
+        .map_err(|e| crate::AoiError::Command(format!("メモリ情報取得スレッドエラー: {}", e)))?;
     let disk_info = h_disk
         .await
-        .map_err(|e| crate::RatError::Command(format!("ディスク情報取得スレッドエラー: {}", e)))?;
+        .map_err(|e| crate::AoiError::Command(format!("ディスク情報取得スレッドエラー: {}", e)))?;
     let uptime_hours = h_uptime
         .await
-        .map_err(|e| crate::RatError::Command(format!("稼働時間取得スレッドエラー: {}", e)))?;
+        .map_err(|e| crate::AoiError::Command(format!("稼働時間取得スレッドエラー: {}", e)))?;
     let public_ip = h_pubip
         .await
-        .map_err(|e| crate::RatError::Command(format!("公開IP取得スレッドエラー: {}", e)))?;
+        .map_err(|e| crate::AoiError::Command(format!("公開IP取得スレッドエラー: {}", e)))?;
     let network_interfaces = h_ifs
         .await
-        .map_err(|e| crate::RatError::Command(format!("IF取得スレッドエラー: {}", e)))?;
+        .map_err(|e| crate::AoiError::Command(format!("IF取得スレッドエラー: {}", e)))?;
     let timezone = h_tz
         .await
-        .map_err(|e| crate::RatError::Command(format!("TZ取得スレッドエラー: {}", e)))?;
+        .map_err(|e| crate::AoiError::Command(format!("TZ取得スレッドエラー: {}", e)))?;
     let locale = h_loc
         .await
-        .map_err(|e| crate::RatError::Command(format!("ロケール取得スレッドエラー: {}", e)))?;
+        .map_err(|e| crate::AoiError::Command(format!("ロケール取得スレッドエラー: {}", e)))?;
     let virtual_machine_vendor = h_vm
         .await
-        .map_err(|e| crate::RatError::Command(format!("VM検出スレッドエラー: {}", e)))?;
+        .map_err(|e| crate::AoiError::Command(format!("VM検出スレッドエラー: {}", e)))?;
 
     let local_ip = network_interfaces
         .iter()

