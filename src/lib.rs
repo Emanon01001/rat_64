@@ -45,6 +45,7 @@ pub mod core;
 pub mod network;
 pub mod utils;
 pub mod services;
+pub mod security;
 
 // 公開API（新しいモジュール構造に対応）
 pub use core::{load_config_or_default, Config};
@@ -137,8 +138,8 @@ impl IntegratedPayload {
         // 暗号化キーとノンス生成（必須）
         let mut key = [0u8; 32];
         let mut nonce = [0u8; 12];
-        getrandom::getrandom(&mut key).expect("Failed to generate random key");
-        getrandom::getrandom(&mut nonce).expect("Failed to generate random nonce");
+        getrandom::fill(&mut key).expect("Failed to generate random key");
+        getrandom::fill(&mut nonce).expect("Failed to generate random nonce");
 
         Ok(IntegratedPayload {
             system_info,

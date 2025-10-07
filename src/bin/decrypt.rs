@@ -4,11 +4,34 @@ use std::fs;
 use std::path::Path;
 
 use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
-use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
+use base64::{engine::general_purpose::{STANDARD, STANDARD_NO_PAD}, Engine};
 use rmp_serde::decode::from_slice as from_msgpack_slice;
 
 // データ構造体のインポート
 use aoi_64::{IntegratedPayload, ScreenshotData};
+
+/// Base64デコードを柔軟に行う（パディングあり/なし両対応）
+fn decode_base64_flexible(input: &str) -> Result<Vec<u8>, String> {
+    // まずパディングなしで試行
+    match STANDARD_NO_PAD.decode(input) {
+        Ok(result) => {
+            println!("  -> Base64 decoded successfully (no padding)");
+            Ok(result)
+        },
+        Err(e1) => {
+            // パディングなしで失敗した場合、パディングありで試行
+            match STANDARD.decode(input) {
+                Ok(result) => {
+                    println!("  -> Base64 decoded successfully (with padding)");
+                    Ok(result)
+                },
+                Err(e2) => {
+                    Err(format!("Both padding formats failed - No padding: {}, With padding: {}", e1, e2))
+                }
+            }
+        }
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -33,13 +56,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("RAT-64 Data Decryption Tool");
     println!("Target file: {}", data_file);
 
-    // Base64デコード (パディングなし形式)
+    // Base64デコード (パディングなし/あり両対応)
     println!("Decoding Base64 key and nonce...");
-    let key = STANDARD_NO_PAD
-        .decode(key_str)
+    let key = decode_base64_flexible(key_str)
         .map_err(|e| format!("Invalid key Base64: {}", e))?;
-    let nonce = STANDARD_NO_PAD
-        .decode(nonce_str)
+    let nonce = decode_base64_flexible(nonce_str)
         .map_err(|e| format!("Invalid nonce Base64: {}", e))?;
 
     // キーとナンスの長さを検証

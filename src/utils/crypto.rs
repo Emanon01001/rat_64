@@ -15,7 +15,7 @@ pub fn encrypt_data_with_key(data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> A
 pub fn generate_key_pair() -> ([u8; 32], [u8; 12]) {
     let mut key = [0u8; 32];
     let mut nonce = [0u8; 12];
-    getrandom::getrandom(&mut key).expect("Failed to generate random key");
-    getrandom::getrandom(&mut nonce).expect("Failed to generate random nonce");
+    getrandom::fill(&mut key).expect("Failed to generate random key");
+    getrandom::fill(&mut nonce).expect("Failed to generate random nonce");
     (key, nonce)
 }

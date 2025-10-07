@@ -393,7 +393,7 @@ fn safe_nss_decrypt_logins(
 
     // NSS初期化の同期とタイムアウト機能
     static NSS_MUTEX: Mutex<()> = Mutex::new(());
-    const NSS_TIMEOUT: Duration = Duration::from_secs(10);
+    const NSS_TIMEOUT: Duration = Duration::from_secs(120); // 10秒から120秒に延長
 
     let _lock = NSS_MUTEX.try_lock().map_err(|_| {
         ChromiumDumpError::Crypto("NSS is already in use by another process".to_string())
@@ -409,11 +409,15 @@ fn safe_nss_decrypt_logins(
 
     let (mut success_count, mut error_count) = (0, 0);
 
-    // タイムアウトチェック付きでログインを復号化
+    // 全エントリを処理（タイムアウト制限を緩和）
     let results: Vec<_> = logins_array
         .iter()
-        .take_while(|_| start_time.elapsed() <= NSS_TIMEOUT)
-        .filter_map(|login| {
+        .enumerate()
+        .filter_map(|(i, login)| {
+            // 100エントリごとに時間をチェック
+            if i % 100 == 0 && start_time.elapsed() > NSS_TIMEOUT {
+                return None;
+            }
             match decrypt_firefox_login(&nss, login) {
                 Ok(Some(entry)) => {
                     success_count += 1;

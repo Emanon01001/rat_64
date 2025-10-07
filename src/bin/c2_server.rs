@@ -21,7 +21,7 @@ use aoi_64::collectors::network_diagnostics::collect_network_diagnostics;
 #[cfg(all(feature = "server_diagnostics", windows))]
 use aoi_64::get_system_info;
 
-const AUTH_TOKEN: &str = "ZajmPAB9o8C5UgATU23mnGdBcun30IuILDaP8efMWRYtSlvT89";
+const AUTH_TOKEN: &str = "";
 const PORT: u16 = 9999;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

