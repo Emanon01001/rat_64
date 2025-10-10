@@ -1,13 +1,11 @@
 ﻿// Browser DLL Injection Module
 // Automatically injects Chrome decrypt DLL into Chrome/Edge/Brave processes
-
 use crate::AoiError;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{c_void, OsStr},
     os::windows::prelude::OsStrExt,
     path::PathBuf,
-    // HashMap不要のため削除
 };
 use windows::core::{PCSTR, PCWSTR, PWSTR};
 use windows::Win32::{

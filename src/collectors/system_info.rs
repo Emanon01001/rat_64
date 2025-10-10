@@ -1,4 +1,4 @@
-﻿// システム情報収集モジュール
+// システム情報収集モジュール
 // use std::process::Command; // 現状未使用
 use crate::AoiResult;
 use serde::{Deserialize, Serialize};
@@ -673,6 +673,83 @@ pub fn get_primary_local_ip() -> Option<String> {
     ifs.into_iter()
         .map(|ni| ni.ip_address)
         .find(|ip| !ip.is_empty() && ip != "127.0.0.1" && ip != "::1")
+}
+
+/// ハードウェアID（HWID）を生成 - 同じハードウェアから一意のIDを生成
+pub fn generate_hardware_id() -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+
+    // CPUの情報を取得
+    let cpu_info = get_cpu_info();
+    hasher.update(cpu_info.as_bytes());
+
+    // メインボード情報を取得（Windows）
+    #[cfg(windows)]
+    {
+        let motherboard_info = get_motherboard_info();
+        hasher.update(motherboard_info.as_bytes());
+    }
+
+    // 最初のネットワークアダプタのMACアドレスを取得
+    let interfaces = get_network_interfaces();
+    if let Some(first_interface) = interfaces
+        .iter()
+        .find(|ni| !ni.mac_address.is_empty() && ni.mac_address != "00:00:00:00:00:00")
+    {
+        hasher.update(first_interface.mac_address.as_bytes());
+    }
+
+    // ホスト名も含める（環境による変動を考慮）
+    #[cfg(windows)]
+    let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Unknown".to_string());
+    #[cfg(not(windows))]
+    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "Unknown".to_string());
+    hasher.update(hostname.as_bytes());
+
+    // ハッシュ結果を16進数文字列として取得し、最初の16文字を使用
+    let result = hasher.finalize();
+    let hex_string = format!("{:x}", result);
+
+    // AOI64プレフィックス付きのHWIDを生成
+    format!("aoi64_{}", &hex_string[..16])
+}
+
+#[cfg(windows)]
+fn get_motherboard_info() -> String {
+    use wmi_util::*;
+    with_services(|services| {
+        use windows::core::BSTR;
+        use windows::Win32::System::Wmi::IEnumWbemClassObject;
+        let enumerator: IEnumWbemClassObject = unsafe {
+            services.ExecQuery(
+                &BSTR::from("WQL"),
+                &BSTR::from("SELECT Manufacturer, Product, SerialNumber FROM Win32_BaseBoard"),
+                WBEM_FLAG_FORWARD_ONLY,
+                None,
+            )
+        }
+        .ok()?;
+        let mut arr = [None];
+        let mut returned = 0;
+        if unsafe { enumerator.Next(WBEM_INFINITE, &mut arr, &mut returned) }.is_err()
+            || returned == 0
+        {
+            return None;
+        }
+        if let Some(obj) = &arr[0] {
+            let manufacturer = read_bstr_property(obj, "Manufacturer");
+            let product = read_bstr_property(obj, "Product");
+            let serial = read_bstr_property(obj, "SerialNumber");
+            let info = format!("{}|{}|{}", manufacturer, product, serial);
+            if info != "||" {
+                return Some(info);
+            }
+        }
+        None
+    })
+    .unwrap_or_else(|| "Unknown".to_string())
 }
 
 fn get_timezone() -> String {

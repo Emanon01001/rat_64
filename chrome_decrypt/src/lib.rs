@@ -1,12 +1,6 @@
 #![cfg(target_os = "windows")]
 // Minimal Windows DLL that runs Chrome/Brave/Edge app-bound decrypt inside host process.
 // Writes JSON outputs to %LOCALAPPDATA%/chrome_decrypt_out/<Browser>/<Profile>/...
-use std::{
-    ffi::c_void,
-    fs,
-    path::{Path, PathBuf},
-    ptr,
-};
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Key, Nonce,
@@ -14,6 +8,12 @@ use aes_gcm::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
+use std::{
+    ffi::c_void,
+    fs,
+    path::{Path, PathBuf},
+    ptr,
+};
 use windows::{
     core::{IUnknown, Interface, BSTR, GUID, HRESULT},
     Win32::System::Com::{
@@ -517,7 +517,7 @@ fn send_data_via_ipc(data: &ChromeDecryptResult) -> anyhow::Result<()> {
     let pipe_name = r"\\.\pipe\rat64_chrome_data";
     let mut pipe_name_wide: Vec<u16> = pipe_name.encode_utf16().collect();
     pipe_name_wide.push(0); // null terminate
-    // 最大5回リトライ
+                            // 最大5回リトライ
     for attempt in 1..=5 {
         let _ = std::fs::OpenOptions::new()
             .append(true)

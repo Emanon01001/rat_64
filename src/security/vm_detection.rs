@@ -8,7 +8,7 @@ pub fn detect_vm_environment(verbose: bool) -> bool {
     } else {
         println!("🔍 緊急VM検知開始...");
     }
-    
+
     // WMI経由の高精度VM検知（最優先）
     match system_info::get_system_info() {
         Ok(sysinfo) => {
@@ -18,9 +18,11 @@ pub fn detect_vm_environment(verbose: bool) -> bool {
                 println!("    OS: {} {}", sysinfo.os_name, sysinfo.os_version);
                 println!("    CPU: {}", sysinfo.cpu_info);
             }
-            
+
             if sysinfo.is_virtual_machine {
-                let vm_vendor = sysinfo.virtual_machine_vendor.unwrap_or("Unknown VM".to_string());
+                let vm_vendor = sysinfo
+                    .virtual_machine_vendor
+                    .unwrap_or("Unknown VM".to_string());
                 if verbose {
                     println!("  ⚠️ VM検知成功: {} が検出されました", vm_vendor);
                     println!("  💥 自己消去を実行します...");
@@ -31,12 +33,12 @@ pub fn detect_vm_environment(verbose: bool) -> bool {
             } else if verbose {
                 println!("  ✅ 物理マシンとして検出");
             }
-        },
+        }
         Err(e) => {
             if verbose {
                 println!("  ❌ システム情報取得エラー: {}", e);
             }
-            
+
             // エラー時のフォールバック: VM指標チェック
             if check_vm_indicators() {
                 if verbose {
@@ -49,7 +51,7 @@ pub fn detect_vm_environment(verbose: bool) -> bool {
             }
         }
     }
-    
+
     if verbose {
         println!("  ✅ VM検知完了: 物理環境として判定");
     }
@@ -66,18 +68,19 @@ fn check_vm_indicators() -> bool {
     #[cfg(windows)]
     {
         use std::process::Command;
-        
+
         // 確実にVM内でのみ動作するプロセス
         let vm_processes = [
-            "vmtoolsd.exe",      // VMware Tools
-            "vboxservice.exe",   // VirtualBox Guest Additions
-            "vmwaretray.exe",    // VMware Tray
-            "vmwareuser.exe",    // VMware User Process
+            "vmtoolsd.exe",    // VMware Tools
+            "vboxservice.exe", // VirtualBox Guest Additions
+            "vmwaretray.exe",  // VMware Tray
+            "vmwareuser.exe",  // VMware User Process
         ];
-        
+
         if let Ok(output) = Command::new("tasklist")
             .args(&["/fi", "STATUS eq RUNNING", "/fo", "csv"])
-            .output() {
+            .output()
+        {
             let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
             for process in &vm_processes {
                 if stdout.contains(&process.to_lowercase()) {
@@ -87,18 +90,18 @@ fn check_vm_indicators() -> bool {
             }
         }
     }
-    
+
     #[cfg(not(windows))]
     {
         // Unix系VM検知ファイル
         let vm_files = [
             "/proc/xen",
-            "/sys/hypervisor/uuid", 
+            "/sys/hypervisor/uuid",
             "/dev/vmci",
             "/proc/vz",
-            "/.dockerenv"
+            "/.dockerenv",
         ];
-        
+
         for file_path in &vm_files {
             if std::path::Path::new(file_path).exists() {
                 println!("    VM指標検出: {}", file_path);
@@ -106,6 +109,6 @@ fn check_vm_indicators() -> bool {
             }
         }
     }
-    
+
     false
 }

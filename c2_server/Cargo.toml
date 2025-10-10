@@ -1,0 +1,35 @@
+[package]
+name = "c2_server"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+overflow-checks = false
+incremental = false
+split-debuginfo = "off"
+
+[dependencies]
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = { version = "0.1", default-features = false }
+bytes = { version = "1", default-features = false, features = ["std"] }
+encoding_rs = { version = "0.8.35", default-features = false, features = ["alloc"] }
+hostname = { version = "0.4", default-features = false }  # ホスト名取得用
+num_cpus = { version = "1.0", default-features = false }  # CPU情報取得用
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }  # 最小時刻処理（c2_server_tlsでは不使用）
+tokio = { version = "1.0", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net", "fs"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+base64 = { version = "0.21", default-features = false, features = ["std"] }
+
+# 暗号化機能の追加
+anyhow = { version = "1.0", default-features = false }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+rsa = { version = "0.9.8", features = ["pem"] }
+sha2 = { version = "0.10", default-features = false }

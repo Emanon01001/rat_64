@@ -1,8 +1,10 @@
 use anyhow::Result;
 use serde_json::Value;
-use std::fs;
-use std::io::{self, Write};
-use std::path::Path;
+use std::{
+    fs,
+    io::{self, Write},
+    path::Path,
+};
 
 pub trait OutputFormat {
     fn output(&self) -> Result<()>;
