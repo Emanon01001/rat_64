@@ -43,9 +43,9 @@ pub type AoiResult<T> = Result<T, AoiError>;
 pub mod collectors;
 pub mod core;
 pub mod network;
-pub mod utils;
-pub mod services;
 pub mod security;
+pub mod services;
+pub mod utils;
 
 // 公開API（新しいモジュール構造に対応）
 pub use core::{load_config_or_default, Config};
@@ -79,7 +79,6 @@ pub use collectors::{
 };
 pub use network::{upload_data_file, upload_multiple, UploadError, UploadResult, Uploader};
 pub use services::C2Client;
-pub use utils::{encrypt_data_with_key, generate_key_pair};
 
 // メイン実行機能
 #[cfg(windows)]

