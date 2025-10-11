@@ -110,10 +110,7 @@ impl Uploader {
             }
         }
 
-        println!(
-            "⚠️  GoFile server discovery failed; using default {}",
-            self.upload_url
-        );
+        // サーバー検出失敗時はデフォルトサーバーを使用
         Ok(self)
     }
 
@@ -168,22 +165,6 @@ impl Uploader {
 
             let v: serde_json::Value =
                 serde_json::from_str(&raw).map_err(|e| UploadError::Json(format!("{e}: {raw}")))?;
-
-            match v.get("status").and_then(|s| s.as_str()) {
-                Some("ok") => {}
-                Some("error") | Some("fail") | None => {
-                    let msg = v
-                        .pointer("/data/message")
-                        .or_else(|| v.pointer("/data/error"))
-                        .or_else(|| v.pointer("/message"))
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("Unknown error");
-                    return Err(UploadError::Network(format!(
-                        "GoFile API error: {msg}; body={raw}"
-                    )));
-                }
-                _ => {}
-            }
 
             match v.get("status").and_then(|s| s.as_str()) {
                 Some("ok") => {} // 続行

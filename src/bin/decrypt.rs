@@ -162,18 +162,6 @@ fn chacha20poly1305_decrypt(
     Ok(decrypted)
 }
 
-fn decode_base64_flexible(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    if input.is_empty() {
-        return Err("Empty Base64 input".into());
-    }
-    if let Ok(decoded) = STANDARD.decode(input) {
-        return Ok(decoded);
-    }
-    STANDARD_NO_PAD
-        .decode(input)
-        .map_err(|_| "Base64 decode failed".into())
-}
-
 // ===== 出力処理 =====
 
 fn sanitize_base64(input: &str) -> String {
@@ -599,8 +587,9 @@ fn _decrypt_with_manual_keys(
     if !Path::new(data_file).exists() {
         return Err(format!("Data file not found: {}", data_file).into());
     }
-    let key = decode_base64_flexible(key_b64)?;
-    let nonce = decode_base64_flexible(nonce_b64)?;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let key = STANDARD.decode(key_b64)?;
+    let nonce = STANDARD.decode(nonce_b64)?;
     if key.len() != 32 || nonce.len() != 12 {
         return Err("Invalid key/nonce lengths".into());
     }

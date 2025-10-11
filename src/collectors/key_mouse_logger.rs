@@ -347,11 +347,9 @@ mod imp {
         let mut events = Vec::new();
         if let Ok(file) = File::open(filename) {
             let reader = BufReader::new(file);
-            for line in reader.lines() {
-                if let Ok(line_content) = line {
-                    if let Ok(event) = serde_json::from_str::<InputEvent>(&line_content) {
-                        events.push(event);
-                    }
+            for line_content in reader.lines().map_while(Result::ok) {
+                if let Ok(event) = serde_json::from_str::<InputEvent>(&line_content) {
+                    events.push(event);
                 }
             }
         }
@@ -586,12 +584,11 @@ mod imp {
                 let mut msg = MSG::default();
                 while running_flag.load(Ordering::Relaxed) {
                     // 通常のメッセージループ（ブロッキング）
-                    if GetMessageW(&mut msg, Some(HWND(null_mut())), 0, 0).as_bool() {
-                        if msg.message == WM_QUIT {
+                    if GetMessageW(&mut msg, Some(HWND(null_mut())), 0, 0).as_bool()
+                        && msg.message == WM_QUIT {
                             break;
                         }
                         // メッセージ処理は不要（フックで直接処理）
-                    }
 
                     // 強制終了チェック
                     if !running_flag.load(Ordering::Relaxed) {

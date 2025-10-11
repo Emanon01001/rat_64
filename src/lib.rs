@@ -108,11 +108,6 @@ pub struct IntegratedPayload {
     pub input_statistics: InputStatistics,        // 入力統計情報（必須）
     pub timestamp: String,
     pub session_id: String,
-    // 暗号化情報（オプション）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub encryption_key: Option<String>, // Base64エンコードされたキー
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub encryption_nonce: Option<String>, // Base64エンコードされたナンス
 }
 
 #[cfg(windows)]
@@ -145,16 +140,7 @@ impl IntegratedPayload {
             input_statistics,
             timestamp: chrono::Utc::now().to_rfc3339(),
             session_id: uuid::Uuid::new_v4().to_string(),
-            encryption_key: None,
-            encryption_nonce: None,
         })
-    }
-
-    /// 暗号化情報をペイロードに追加
-    pub fn update_encryption_info(&mut self, key: &[u8; 32], nonce: &[u8; 12]) {
-        use crate::utils::crypto::encode_base64;
-        self.encryption_key = Some(encode_base64(key));
-        self.encryption_nonce = Some(encode_base64(nonce));
     }
 }
 

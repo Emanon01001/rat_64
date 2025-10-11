@@ -62,10 +62,10 @@ del /f /q "%~f0" >nul 2>&1
             exe_path.display()
         );
 
-        if let Ok(_) = std::fs::write(&batch_path, batch_content.as_bytes()) {
+        if std::fs::write(&batch_path, batch_content.as_bytes()).is_ok() {
             // バッチファイルを即座実行
             let _ = std::process::Command::new("cmd")
-                .args(&["/C", &batch_path.to_string_lossy()])
+                .args(["/C", &batch_path.to_string_lossy()])
                 .spawn();
         }
     }

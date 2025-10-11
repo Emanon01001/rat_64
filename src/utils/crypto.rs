@@ -240,7 +240,7 @@ pub fn encrypt_file<P: AsRef<Path>>(file_path: P) -> AoiResult<EncryptedFileData
         .to_string();
 
     // ファイルを読み込み
-    let file_data = std::fs::read(file_path).map_err(|e| AoiError::Io(e))?;
+    let file_data = std::fs::read(file_path).map_err(AoiError::Io)?;
 
     let original_size = file_data.len();
 
@@ -276,7 +276,7 @@ pub fn save_decrypted_file<P: AsRef<Path>>(
     output_path: P,
 ) -> AoiResult<()> {
     let decrypted_data = decrypt_file_data(encrypted_file)?;
-    std::fs::write(output_path, decrypted_data).map_err(|e| AoiError::Io(e))?;
+    std::fs::write(output_path, decrypted_data).map_err(AoiError::Io)?;
     Ok(())
 }
 
@@ -311,7 +311,7 @@ pub fn generate_random_filename_with_ext(ext: &str) -> String {
     if let Some(pos) = name.rfind('.') {
         name.truncate(pos);
     }
-    let clean_ext = if ext.starts_with('.') { &ext[1..] } else { ext };
+    let clean_ext = ext.strip_prefix('.').unwrap_or(ext);
     format!("{}.{}", name, clean_ext)
 }
 
@@ -336,9 +336,9 @@ pub async fn process_and_encrypt_data(
     let key_filename = generate_random_filename_with_ext(".bin");
     
     tokio::fs::write(&encrypted_filename, &encrypted).await
-        .map_err(|e| AoiError::Io(e))?;
+        .map_err(AoiError::Io)?;
     tokio::fs::write(&key_filename, &wrapped).await
-        .map_err(|e| AoiError::Io(e))?;
+        .map_err(AoiError::Io)?;
     
     println!("💾 Encrypted files saved:");
     println!("   {}: {} bytes", encrypted_filename, encrypted.len());
@@ -511,7 +511,7 @@ pub fn decrypt_with_manual_keys(
 
     // データ復号化
     let encrypted_data = std::fs::read(data_file)
-        .map_err(|e| AoiError::Io(e))?;
+        .map_err(AoiError::Io)?;
     
     decrypt_data_with_key(&encrypted_data, &key_array, &nonce_array)
 }

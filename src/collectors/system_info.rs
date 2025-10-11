@@ -354,7 +354,8 @@ fn get_cpu_info() -> String {
     #[cfg(windows)]
     {
         use wmi_util::*;
-        let name = with_services(|services| {
+        
+        with_services(|services| {
             use windows::core::BSTR;
             use windows::Win32::System::Wmi::IEnumWbemClassObject;
             let enumerator: IEnumWbemClassObject = unsafe {
@@ -381,8 +382,7 @@ fn get_cpu_info() -> String {
             }
             None
         })
-        .unwrap_or_else(|| "Unknown CPU".to_string());
-        name
+        .unwrap_or_else(|| "Unknown CPU".to_string())
     }
     #[cfg(not(windows))]
     {
@@ -557,7 +557,7 @@ fn get_network_interfaces() -> Vec<NetworkInterface> {
             GAA_FLAG_SKIP_MULTICAST, GET_ADAPTERS_ADDRESSES_FLAGS, IP_ADAPTER_ADDRESSES_LH,
         };
         use windows::Win32::Networking::WinSock::{
-            WSAAddressToStringW, WSACleanup, WSAStartup, SOCKADDR, WSADATA,
+            WSAAddressToStringW, WSACleanup, WSAStartup, WSADATA,
         };
 
         // Initialize Winsock (best-effort)
@@ -626,7 +626,7 @@ fn get_network_interfaces() -> Vec<NetworkInterface> {
                         let mut bufw = [0u16; 128];
                         let mut len: u32 = bufw.len() as u32;
                         let rc = WSAAddressToStringW(
-                            u.Address.lpSockaddr as *mut SOCKADDR,
+                            u.Address.lpSockaddr,
                             u.Address.iSockaddrLength as u32,
                             None,
                             PWSTR(bufw.as_mut_ptr()),

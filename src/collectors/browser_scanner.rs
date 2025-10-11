@@ -277,6 +277,12 @@ pub struct DatabaseResults {
     pub cookie_entries: Vec<CookieEntry>,
 }
 
+impl Default for DatabaseResults {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DatabaseResults {
     pub fn new() -> Self {
         Self {
@@ -530,8 +536,7 @@ fn decrypt_firefox_login(
     let date_created = login
         .get("timeCreated")
         .and_then(|v| v.as_u64())
-        .map(|ts| chrono::DateTime::from_timestamp_millis(ts as i64))
-        .flatten();
+        .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts as i64));
 
     #[cfg(not(feature = "datetime"))]
     let date_created = login
@@ -543,8 +548,7 @@ fn decrypt_firefox_login(
     let date_last_used = login
         .get("timeLastUsed")
         .and_then(|v| v.as_u64())
-        .map(|ts| chrono::DateTime::from_timestamp_millis(ts as i64))
-        .flatten();
+        .and_then(|ts| chrono::DateTime::from_timestamp_millis(ts as i64));
 
     #[cfg(not(feature = "datetime"))]
     let date_last_used = login

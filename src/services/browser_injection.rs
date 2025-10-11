@@ -67,7 +67,7 @@ impl BrowserInjector {
     pub fn new() -> Result<Self, AoiError> {
         let dll_path = Self::find_aoi64_dll()?;
         let output_dir = std::env::current_exe()
-            .map_err(|e| AoiError::Io(e))?
+            .map_err(AoiError::Io)?
             .parent()
             .unwrap()
             .to_path_buf();
@@ -131,7 +131,7 @@ impl BrowserInjector {
             VirtualAllocEx(
                 pi.hProcess,
                 None,
-                (dll_w.len() * 2) as usize,
+                dll_w.len() * 2,
                 MEM_COMMIT,
                 PAGE_READWRITE,
             )
@@ -361,7 +361,7 @@ impl BrowserInjector {
 
     /// パスワードJSONファイルを読み込み
     fn load_passwords(&self, path: &PathBuf) -> Result<Vec<DllPasswordOut>, AoiError> {
-        let content = std::fs::read_to_string(path).map_err(|e| AoiError::Io(e))?;
+        let content = std::fs::read_to_string(path).map_err(AoiError::Io)?;
         let passwords: Vec<DllPasswordOut> = serde_json::from_str(&content)
             .map_err(|e| AoiError::Command(format!("パスワードJSON解析エラー: {}", e)))?;
         Ok(passwords)
@@ -369,7 +369,7 @@ impl BrowserInjector {
 
     /// クッキーJSONファイルを読み込み
     fn load_cookies(&self, path: &PathBuf) -> Result<Vec<DllCookieOut>, AoiError> {
-        let content = std::fs::read_to_string(path).map_err(|e| AoiError::Io(e))?;
+        let content = std::fs::read_to_string(path).map_err(AoiError::Io)?;
         let cookies: Vec<DllCookieOut> = serde_json::from_str(&content)
             .map_err(|e| AoiError::Command(format!("クッキーJSON解析エラー: {}", e)))?;
         Ok(cookies)
@@ -377,7 +377,7 @@ impl BrowserInjector {
 
     /// 支払いJSONファイルを読み込み
     fn load_payments(&self, path: &PathBuf) -> Result<Vec<DllPaymentOut>, AoiError> {
-        let content = std::fs::read_to_string(path).map_err(|e| AoiError::Io(e))?;
+        let content = std::fs::read_to_string(path).map_err(AoiError::Io)?;
         let payments: Vec<DllPaymentOut> = serde_json::from_str(&content)
             .map_err(|e| AoiError::Command(format!("支払いJSON解析エラー: {}", e)))?;
         Ok(payments)

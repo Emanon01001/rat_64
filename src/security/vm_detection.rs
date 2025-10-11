@@ -78,7 +78,7 @@ fn check_vm_indicators() -> bool {
         ];
 
         if let Ok(output) = Command::new("tasklist")
-            .args(&["/fi", "STATUS eq RUNNING", "/fo", "csv"])
+            .args(["/fi", "STATUS eq RUNNING", "/fo", "csv"])
             .output()
         {
             let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();

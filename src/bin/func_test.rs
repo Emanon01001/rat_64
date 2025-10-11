@@ -26,6 +26,7 @@ fn main() {
     let data: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
     let (key, nonce) = generate_key_pair();
+    println!("{:?}\n\n{:?}", key, nonce);
     let serialized = to_vec(data).expect("Error");
 
     let d1 = encrypt(&serialized, &key, &nonce).expect("Error");
